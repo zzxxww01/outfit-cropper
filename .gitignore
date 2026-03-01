@@ -1,0 +1,28 @@
+# Secrets and credentials
+.env
+*.json
+
+# Runtime artifacts
+checkpoints/
+gpu_output/
+input_images/
+results/
+logs/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
