@@ -20,7 +20,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
     ),
     "sam": ModelSpec(
         name="sam",
-        repo_id="facebook/sam2.1-hiera-large",
+        repo_id="facebook/sam-vit-base",
         note="Segmentation model backbone for Step2.",
     ),
     "inpaint": ModelSpec(
@@ -37,7 +37,9 @@ MODEL_SPECS: dict[str, ModelSpec] = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Download Phase1 model weights to checkpoints/")
+    parser = argparse.ArgumentParser(
+        description="Download Phase1 model weights to checkpoints/"
+    )
     parser.add_argument("--checkpoints-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument(
         "--models",
@@ -68,7 +70,9 @@ def main() -> int:
     for model_name in selected:
         spec = MODEL_SPECS.get(model_name)
         if spec is None:
-            print(f"[skip] unknown model '{model_name}'. available={list(MODEL_SPECS.keys())}")
+            print(
+                f"[skip] unknown model '{model_name}'. available={list(MODEL_SPECS.keys())}"
+            )
             continue
 
         target = args.checkpoints_dir / spec.name
@@ -83,7 +87,9 @@ def main() -> int:
             _download_hf_repo(spec.repo_id, target, force=args.force)
             print(f"[ok] downloaded '{spec.name}' -> {target}")
         except ImportError:
-            print("[error] huggingface-hub is not installed. Install requirements_gpu.txt first.")
+            print(
+                "[error] huggingface-hub is not installed. Install requirements_gpu.txt first."
+            )
             return 1
         except Exception as exc:
             print(f"[error] failed to download '{spec.name}': {exc}")
@@ -93,4 +99,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

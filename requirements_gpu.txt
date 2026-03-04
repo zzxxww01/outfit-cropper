@@ -10,4 +10,5 @@ safetensors>=0.4
 huggingface-hub>=0.24
 surya-ocr>=0.8
 pydantic>=2.8
-
+einops
+timm

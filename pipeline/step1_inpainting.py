@@ -8,74 +8,136 @@ from PIL import Image
 
 from utils.gpu_memory import clear_cuda_cache, log_gpu_memory
 
+import torch
+from diffusers import AutoPipelineForInpainting
+from surya.detection import DetectionPredictor
+from surya.model.detection.model import (
+    load_model as load_det_model,
+    load_processor as load_det_processor,
+)
+
 try:
     import cv2
-except Exception:  # pragma: no cover - optional during local planning
+except Exception:  # pragma: no cover
     cv2 = None
 
 
 class InpaintingProcessor:
     """
-    Phase 1 - Step 1 placeholder implementation.
-
-    Real model wiring (Surya OCR + SD/PowerPaint) is intentionally isolated.
-    This class already enforces the memory-release contract before Step 2.
+    Phase 1 - Step 1: Detects text using Surya OCR and inpaints using Stable Diffusion.
     """
 
-    def __init__(self, checkpoints_dir: Path, device: str = "cuda", logger: logging.Logger | None = None) -> None:
+    def __init__(
+        self,
+        checkpoints_dir: Path,
+        device: str = "cuda",
+        logger: logging.Logger | None = None,
+    ) -> None:
         self.checkpoints_dir = checkpoints_dir
         self.device = device
         self.logger = logger or logging.getLogger(__name__)
-        self._ocr_model = None
+        self._ocr_det_model = None
+        self._ocr_det_processor = None
+        self._ocr_predictor = None
         self._inpaint_model = None
 
     def load_models(self) -> None:
-        if self._ocr_model is not None and self._inpaint_model is not None:
+        if self._ocr_det_model is not None and self._inpaint_model is not None:
             return
 
-        # TODO(Phase1 enhancement): replace placeholders with real Surya and Inpainting model objects.
-        self._ocr_model = object()
-        self._inpaint_model = object()
-        self.logger.info("Step1 models loaded (placeholder mode).")
+        self.logger.info("Loading Surya OCR Detection Model...")
+        # Surya handles downloading automatically or loads from cache
+        self._ocr_det_model = load_det_model(device=self.device)
+        self._ocr_det_processor = load_det_processor()
+        self._ocr_predictor = DetectionPredictor(
+            self._ocr_det_model, self._ocr_det_processor
+        )
+
+        self.logger.info("Loading Stable Diffusion Inpainting Model...")
+        inpaint_path = self.checkpoints_dir / "inpaint"
+        if not inpaint_path.exists():
+            # Fallback to loading from HF directly if not downloaded to local path
+            inpaint_path = "runwayml/stable-diffusion-inpainting"
+
+        self._inpaint_model = AutoPipelineForInpainting.from_pretrained(
+            inpaint_path, torch_dtype=torch.float16, variant="fp16"
+        ).to(self.device)
+
+        self.logger.info("Step1 models loaded.")
         log_gpu_memory(self.logger, prefix="After Step1 load")
 
     def run(self, image: Image.Image) -> Image.Image:
         self.load_models()
-        image_np = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        image_rgb = image.convert("RGB")
+        image_np = np.asarray(image_rgb, dtype=np.uint8)
 
-        if cv2 is None:
-            self.logger.warning("OpenCV is unavailable; Step1 falls back to no-op.")
-            return Image.fromarray(image_np)
+        text_mask = self._build_text_like_mask(image_rgb)
 
-        text_mask = self._build_text_like_mask(image_np)
-        repaired = self._inpaint(image_np, text_mask)
-        return Image.fromarray(repaired)
+        # If no text found, return original
+        if np.max(text_mask) == 0:
+            return image_rgb
+
+        mask_image = Image.fromarray(text_mask)
+        repaired_image = self._inpaint(image_rgb, mask_image)
+        return repaired_image
 
     def unload_models(self) -> None:
         # Hard requirement from tech spec: explicit del + empty cache between Step1 and Step2.
-        if self._ocr_model is not None:
-            del self._ocr_model
-            self._ocr_model = None
+        if self._ocr_det_model is not None:
+            del self._ocr_det_model
+            self._ocr_det_model = None
+        if self._ocr_det_processor is not None:
+            del self._ocr_det_processor
+            self._ocr_det_processor = None
+        if self._ocr_predictor is not None:
+            del self._ocr_predictor
+            self._ocr_predictor = None
         if self._inpaint_model is not None:
             del self._inpaint_model
             self._inpaint_model = None
+
         clear_cuda_cache(self.logger, reason="step1_to_step2")
         log_gpu_memory(self.logger, prefix="After Step1 unload")
 
-    @staticmethod
-    def _build_text_like_mask(image_rgb: np.ndarray) -> np.ndarray:
-        hsv = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
-        high_sat = hsv[:, :, 1] > 130
-        bright = hsv[:, :, 2] > 120
-        mask = np.where(high_sat & bright, 255, 0).astype(np.uint8)
-        kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        mask = cv2.dilate(mask, kernel, iterations=1)
+    def _build_text_like_mask(self, image_rgb: Image.Image) -> np.ndarray:
+        # Run Surya detection
+        predictions = self._ocr_predictor([image_rgb])
+        pred = predictions[0]
+
+        width, height = image_rgb.size
+        mask = np.zeros((height, width), dtype=np.uint8)
+
+        for bbox_det in pred.bboxes:
+            # bbox is [x1, y1, x2, y2] or similar format, polygon can be used if available
+            polygon = bbox_det.polygon
+            if cv2 is not None and polygon is not None:
+                pts = np.array(polygon, np.int32)
+                pts = pts.reshape((-1, 1, 2))
+                cv2.fillPoly(mask, [pts], 255)
+
+        # Dilate mask slightly to cover text edges well
+        if cv2 is not None and np.max(mask) > 0:
+            kernel = np.ones((5, 5), np.uint8)
+            mask = cv2.dilate(mask, kernel, iterations=2)
+
         return mask
 
-    @staticmethod
-    def _inpaint(image_rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        if mask.max() == 0:
-            return image_rgb
-        return cv2.inpaint(image_rgb, mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+    def _inpaint(self, image_rgb: Image.Image, mask_image: Image.Image) -> Image.Image:
+        # Resize image and mask to suitable sizes for SD if needed, or rely on auto-resizing
+        # RunwayML SD Inpainting is typically 512x512, diffusers usually handles resizing natively
+        generator = torch.Generator(device=self.device).manual_seed(42)
 
+        output = self._inpaint_model(
+            prompt="high quality, original background, seamless",
+            negative_prompt="text, watermark, logo, bad anatomy",
+            image=image_rgb,
+            mask_image=mask_image,
+            num_inference_steps=20,
+            generator=generator,
+        ).images[0]
+
+        # Ensure output is same size as input if pipeline resized it
+        if output.size != image_rgb.size:
+            output = output.resize(image_rgb.size, Image.Resampling.LANCZOS)
+
+        return output

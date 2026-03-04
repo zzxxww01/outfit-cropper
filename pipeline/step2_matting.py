@@ -6,8 +6,10 @@ from typing import List, Tuple
 
 import numpy as np
 from PIL import Image
+import torch
 
 from schemas.models import GpuMetaItem
+from utils.gpu_memory import clear_cuda_cache, log_gpu_memory
 from utils.image_utils import (
     bbox_xyxy_to_1000,
     clamp_bbox_xyxy,
@@ -18,21 +20,16 @@ from utils.image_utils import (
 )
 from utils.io_utils import ensure_dir
 
-try:
-    import cv2
-except Exception:  # pragma: no cover - optional during local planning
-    cv2 = None
-
+from transformers import AutoProcessor, AutoModelForCausalLM
+from transformers import SamModel, SamProcessor
 
 BBoxXYXY = Tuple[int, int, int, int]
 
 
 class MattingProcessor:
     """
-    Phase 1 - Step 2/3 implementation shell.
-
-    Current implementation uses robust CV fallbacks.
-    TODO(Phase1 enhancement): replace detect/segment internals with Florence-2 + SAM.
+    Phase 1 - Step 2/3 implementation
+    Uses Florence-2 for object detection and SAM for segmentation.
     """
 
     def __init__(
@@ -50,31 +47,63 @@ class MattingProcessor:
         self.max_items = max_items
         self.min_box_area_ratio = min_box_area_ratio
         self.pad_ratio = pad_ratio
-        self._detector_model = None
-        self._segment_model = None
+        self._florence_model = None
+        self._florence_processor = None
+        self._sam_model = None
+        self._sam_processor = None
 
     def load_models(self) -> None:
-        if self._detector_model is not None and self._segment_model is not None:
+        if self._florence_model is not None and self._sam_model is not None:
             return
-        # TODO(Phase1 enhancement): load Florence-2 and SAM models from checkpoints.
-        self._detector_model = object()
-        self._segment_model = object()
-        self.logger.info("Step2 models loaded (placeholder mode).")
+
+        self.logger.info("Loading Florence-2 Model...")
+        florence_path = self.checkpoints_dir / "florence"
+        if not florence_path.exists():
+            florence_path = "microsoft/Florence-2-base"
+        self._florence_processor = AutoProcessor.from_pretrained(
+            florence_path, trust_remote_code=True
+        )
+        self._florence_model = (
+            AutoModelForCausalLM.from_pretrained(florence_path, trust_remote_code=True)
+            .to(self.device)
+            .eval()
+        )
+
+        self.logger.info("Loading SAM Model...")
+        sam_path = self.checkpoints_dir / "sam"
+        if not sam_path.exists():
+            sam_path = "facebook/sam-vit-base"
+        self._sam_processor = SamProcessor.from_pretrained(sam_path)
+        self._sam_model = SamModel.from_pretrained(sam_path).to(self.device).eval()
+
+        self.logger.info("Step2 models loaded.")
+        log_gpu_memory(self.logger, prefix="After Step2 load")
 
     def unload_models(self) -> None:
-        if self._detector_model is not None:
-            del self._detector_model
-            self._detector_model = None
-        if self._segment_model is not None:
-            del self._segment_model
-            self._segment_model = None
+        if self._florence_model is not None:
+            del self._florence_model
+            self._florence_model = None
+        if self._florence_processor is not None:
+            del self._florence_processor
+            self._florence_processor = None
+        if self._sam_model is not None:
+            del self._sam_model
+            self._sam_model = None
+        if self._sam_processor is not None:
+            del self._sam_processor
+            self._sam_processor = None
+        clear_cuda_cache(self.logger, reason="after_step2")
+        log_gpu_memory(self.logger, prefix="After Step2 unload")
 
-    def extract_and_save_items(self, image: Image.Image, output_dir: Path) -> List[GpuMetaItem]:
+    def extract_and_save_items(
+        self, image: Image.Image, output_dir: Path
+    ) -> List[GpuMetaItem]:
         self.load_models()
         ensure_dir(output_dir)
 
-        image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-        height, width = image_rgb.shape[:2]
+        image_rgb = image.convert("RGB")
+        image_np = np.asarray(image_rgb, dtype=np.uint8)
+        height, width = image_np.shape[:2]
 
         candidate_boxes = self._detect_candidate_boxes(image_rgb)
         if not candidate_boxes:
@@ -90,8 +119,10 @@ class MattingProcessor:
                 continue
 
             object_box = clamp_bbox_xyxy(object_box, width, height)
-            padded_box = expand_bbox_xyxy(object_box, width, height, pad_ratio=self.pad_ratio)
-            composed = composite_on_white(image_rgb, mask)
+            padded_box = expand_bbox_xyxy(
+                object_box, width, height, pad_ratio=self.pad_ratio
+            )
+            composed = composite_on_white(image_np, mask)
             crop = crop_rgb(composed, padded_box)
             if crop.size == 0:
                 continue
@@ -101,7 +132,9 @@ class MattingProcessor:
             Image.fromarray(crop).save(item_path, format="JPEG", quality=95)
 
             mask_area = float((mask > 0).sum())
-            bbox_area = float((object_box[2] - object_box[0]) * (object_box[3] - object_box[1]))
+            bbox_area = float(
+                (object_box[2] - object_box[0]) * (object_box[3] - object_box[1])
+            )
             confidence = 0.0 if bbox_area <= 0 else min(1.0, mask_area / bbox_area)
             meta_item = GpuMetaItem(
                 item_image_path=item_name,
@@ -113,54 +146,74 @@ class MattingProcessor:
 
         return items
 
-    def _detect_candidate_boxes(self, image_rgb: np.ndarray) -> List[BBoxXYXY]:
-        h, w = image_rgb.shape[:2]
-        if cv2 is None:
-            return [self._fallback_center_box(w, h)]
+    def _detect_candidate_boxes(self, image_rgb: Image.Image) -> List[BBoxXYXY]:
+        prompt = "<OD>"
+        text_input = prompt + " clothing, top, pants, skirt, dress, shoes, hat, bag"
 
-        gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
-        edges = cv2.Canny(gray, threshold1=60, threshold2=150)
-        kernel = np.ones((5, 5), np.uint8)
-        merged = cv2.dilate(edges, kernel, iterations=2)
-        contours, _ = cv2.findContours(merged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        inputs = self._florence_processor(
+            text=text_input, images=image_rgb, return_tensors="pt"
+        ).to(self.device)
 
-        min_area = h * w * self.min_box_area_ratio
-        boxes: List[BBoxXYXY] = []
-        for contour in contours:
-            x, y, bw, bh = cv2.boundingRect(contour)
-            area = bw * bh
-            if area < min_area:
-                continue
-            box = clamp_bbox_xyxy((x, y, x + bw, y + bh), w, h)
-            boxes.append(box)
+        with torch.no_grad():
+            generated_ids = self._florence_model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=1024,
+                num_beams=3,
+            )
+
+        generated_text = self._florence_processor.batch_decode(
+            generated_ids, skip_special_tokens=False
+        )[0]
+        parsed_answer = self._florence_processor.post_process_generation(
+            generated_text, task=prompt, image_size=(image_rgb.width, image_rgb.height)
+        )
+
+        boxes = []
+        min_area = image_rgb.width * image_rgb.height * self.min_box_area_ratio
+
+        if "<OD>" in parsed_answer and "bboxes" in parsed_answer["<OD>"]:
+            for bbox in parsed_answer["<OD>"]["bboxes"]:
+                x1, y1, x2, y2 = bbox
+                box = clamp_bbox_xyxy(
+                    (int(x1), int(y1), int(x2), int(y2)),
+                    image_rgb.width,
+                    image_rgb.height,
+                )
+                area = (box[2] - box[0]) * (box[3] - box[1])
+                if area >= min_area:
+                    boxes.append(box)
 
         boxes = self._nms(boxes, iou_threshold=0.5)
         if not boxes:
-            boxes = [self._fallback_center_box(w, h)]
+            boxes = [self._fallback_center_box(image_rgb.width, image_rgb.height)]
         return boxes
 
-    def _segment_box(self, image_rgb: np.ndarray, box: BBoxXYXY) -> np.ndarray:
-        h, w = image_rgb.shape[:2]
-        x1, y1, x2, y2 = clamp_bbox_xyxy(box, w, h)
-        if cv2 is None:
-            mask = np.zeros((h, w), dtype=np.uint8)
-            mask[y1:y2, x1:x2] = 255
-            return mask
+    def _segment_box(self, image_rgb: Image.Image, box: BBoxXYXY) -> np.ndarray:
+        # SAM expects input_boxes as [[x1, y1, x2, y2]]
+        inputs = self._sam_processor(
+            image_rgb, input_boxes=[[[box]]], return_tensors="pt"
+        ).to(self.device)
 
-        mask = np.zeros((h, w), np.uint8)
-        bgd_model = np.zeros((1, 65), np.float64)
-        fgd_model = np.zeros((1, 65), np.float64)
-        rect = (x1, y1, max(1, x2 - x1), max(1, y2 - y1))
-        try:
-            cv2.grabCut(image_rgb, mask, rect, bgd_model, fgd_model, 2, cv2.GC_INIT_WITH_RECT)
-            binary = np.where((mask == 1) | (mask == 3), 255, 0).astype(np.uint8)
-        except Exception:
-            binary = np.zeros((h, w), dtype=np.uint8)
-            binary[y1:y2, x1:x2] = 255
-        kernel = np.ones((3, 3), np.uint8)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-        return binary
+        with torch.no_grad():
+            outputs = self._sam_model(**inputs)
+
+        # Get the mask with highest IoU score
+        masks = outputs.pred_masks.squeeze(1)
+        scores = outputs.iou_scores.squeeze(1)
+        best_mask_idx = scores.argmax()
+
+        mask = masks[0, best_mask_idx].cpu().numpy()
+
+        # Resize mask to original image size if needed
+        if mask.shape != (image_rgb.height, image_rgb.width):
+            mask_img = Image.fromarray((mask * 255).astype(np.uint8))
+            mask_img = mask_img.resize((image_rgb.width, image_rgb.height), Image.Resampling.NEAREST)
+            mask = np.array(mask_img) / 255.0
+
+        binary_mask = (mask > 0.5).astype(np.uint8) * 255
+
+        return binary_mask
 
     @staticmethod
     def _fallback_center_box(width: int, height: int) -> BBoxXYXY:
@@ -206,4 +259,3 @@ class MattingProcessor:
         area_b = max(1, (bx2 - bx1) * (by2 - by1))
         union = area_a + area_b - inter
         return float(inter / union) if union > 0 else 0.0
-
