@@ -10,8 +10,7 @@ from utils.gpu_memory import clear_cuda_cache, log_gpu_memory
 
 import torch
 from diffusers import AutoPipelineForInpainting
-from surya.detection import batch_text_detection
-from surya.model.detection.segformer import load_model, load_processor
+from surya.detection import DetectionPredictor
 
 try:
     import cv2
@@ -33,18 +32,16 @@ class InpaintingProcessor:
         self.checkpoints_dir = checkpoints_dir
         self.device = device
         self.logger = logger or logging.getLogger(__name__)
-        self._ocr_model = None
-        self._ocr_processor = None
+        self._ocr_predictor = None
         self._inpaint_model = None
 
     def load_models(self) -> None:
-        if self._ocr_model is not None and self._inpaint_model is not None:
+        if self._ocr_predictor is not None and self._inpaint_model is not None:
             return
 
         self.logger.info("Loading Surya OCR Detection Model...")
-        # Surya handles downloading automatically or loads from cache
-        self._ocr_model = load_model()
-        self._ocr_processor = load_processor()
+        # DetectionPredictor handles model loading automatically
+        self._ocr_predictor = DetectionPredictor(device=self.device)
 
         self.logger.info("Loading Stable Diffusion Inpainting Model...")
         inpaint_path = self.checkpoints_dir / "inpaint"
@@ -76,12 +73,9 @@ class InpaintingProcessor:
 
     def unload_models(self) -> None:
         # Hard requirement from tech spec: explicit del + empty cache between Step1 and Step2.
-        if self._ocr_model is not None:
-            del self._ocr_model
-            self._ocr_model = None
-        if self._ocr_processor is not None:
-            del self._ocr_processor
-            self._ocr_processor = None
+        if self._ocr_predictor is not None:
+            del self._ocr_predictor
+            self._ocr_predictor = None
         if self._inpaint_model is not None:
             del self._inpaint_model
             self._inpaint_model = None
@@ -90,8 +84,8 @@ class InpaintingProcessor:
         log_gpu_memory(self.logger, prefix="After Step1 unload")
 
     def _build_text_like_mask(self, image_rgb: Image.Image) -> np.ndarray:
-        # Run Surya detection
-        predictions = batch_text_detection([image_rgb], self._ocr_model, self._ocr_processor)
+        # Run Surya detection - DetectionPredictor is callable
+        predictions = self._ocr_predictor([image_rgb])
         pred = predictions[0]
 
         width, height = image_rgb.size
