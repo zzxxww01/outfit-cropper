@@ -158,7 +158,12 @@ class MattingProcessor:
 
         inputs = self._florence_processor(
             text=prompt, images=image_rgb, return_tensors="pt"
-        ).to(self.device)
+        )
+
+        # Move inputs to device and convert to float16 to match model dtype
+        inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+        if "pixel_values" in inputs:
+            inputs["pixel_values"] = inputs["pixel_values"].to(torch.float16)
 
         with torch.no_grad():
             generated_ids = self._florence_model.generate(
