@@ -64,7 +64,11 @@ class MattingProcessor:
             florence_path, trust_remote_code=True
         )
         self._florence_model = (
-            AutoModelForCausalLM.from_pretrained(florence_path, trust_remote_code=True)
+            AutoModelForCausalLM.from_pretrained(
+                florence_path,
+                trust_remote_code=True,
+                attn_implementation="eager"  # Disable SDPA to avoid compatibility issues
+            )
             .to(self.device)
             .eval()
         )
