@@ -2,4 +2,4 @@ pydantic>=2.8
 pillow>=10.0
 python-dotenv>=1.0
 google-cloud-aiplatform>=1.70
-
+ultralytics

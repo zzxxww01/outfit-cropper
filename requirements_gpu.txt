@@ -12,3 +12,4 @@ surya-ocr>=0.8
 pydantic>=2.8
 einops
 timm
+ultralytics
