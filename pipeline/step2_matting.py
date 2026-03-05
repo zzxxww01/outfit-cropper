@@ -151,11 +151,11 @@ class MattingProcessor:
         return items
 
     def _detect_candidate_boxes(self, image_rgb: Image.Image) -> List[BBoxXYXY]:
+        # Florence-2 task token must be used alone, no additional text
         prompt = "<OD>"
-        text_input = prompt + " clothing, top, pants, skirt, dress, shoes, hat, bag"
 
         inputs = self._florence_processor(
-            text=text_input, images=image_rgb, return_tensors="pt"
+            text=prompt, images=image_rgb, return_tensors="pt"
         ).to(self.device)
 
         with torch.no_grad():
