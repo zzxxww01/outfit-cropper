@@ -199,21 +199,46 @@ class MattingProcessor:
             )
             return []
 
-        try:
-            with torch.no_grad():
-                # Use explicit args to avoid passing unsupported/malformed processor fields.
-                generated_ids = self._florence_model.generate(
-                    input_ids=model_inputs["input_ids"],
-                    pixel_values=model_inputs["pixel_values"],
-                    attention_mask=model_inputs.get("attention_mask"),
-                    max_new_tokens=1024,
-                    num_beams=1,
-                    pad_token_id=self._florence_processor.tokenizer.pad_token_id,
+        generate_base_kwargs = {
+            "input_ids": model_inputs["input_ids"],
+            "pixel_values": model_inputs["pixel_values"],
+            "max_new_tokens": 1024,
+            "do_sample": False,
+            "num_beams": 1,
+            "early_stopping": False,
+            "pad_token_id": self._florence_processor.tokenizer.pad_token_id,
+        }
+        attention_mask = model_inputs.get("attention_mask")
+        if attention_mask is not None:
+            generate_base_kwargs["attention_mask"] = attention_mask
+
+        generate_attempts = [
+            ("default", {}),
+            # Florence-2 custom code can hit a KV-cache bug in some envs.
+            ("no_cache", {"use_cache": False}),
+            ("beam_no_cache", {"use_cache": False, "num_beams": 3, "early_stopping": True}),
+        ]
+        generated_ids = None
+        for attempt_name, attempt_kwargs in generate_attempts:
+            try:
+                with torch.no_grad():
+                    generated_ids = self._florence_model.generate(
+                        **generate_base_kwargs,
+                        **attempt_kwargs,
+                    )
+                if generated_ids is not None:
+                    break
+            except Exception as exc:
+                self.logger.warning(
+                    "Florence generate (%s) failed: %s",
+                    attempt_name,
+                    exc,
                 )
-        except Exception as exc:
-            self.logger.warning("Florence generate failed: %s", exc)
-            self.logger.debug("Florence generate traceback", exc_info=True)
-            return []
+                self.logger.debug(
+                    "Florence generate (%s) traceback",
+                    attempt_name,
+                    exc_info=True,
+                )
 
         if generated_ids is None:
             self.logger.warning("Florence generate returned None.")
