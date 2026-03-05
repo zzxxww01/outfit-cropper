@@ -116,45 +116,38 @@ class MattingProcessor:
 
         items: List[GpuMetaItem] = []
         for index, box in enumerate(candidate_boxes[: self.max_items]):
-            try:
-                mask = self._segment_box(image_rgb, box)
-                if mask is None:
-                    self.logger.warning("Skip candidate %s: _segment_box returned None", index)
-                    continue
+            mask = self._segment_box(image_rgb, box)
 
-                object_box = mask_to_bbox_xyxy(mask)
-                if object_box is None:
-                    self.logger.debug("Skip candidate %s due to empty mask.", index)
-                    continue
-
-                object_box = clamp_bbox_xyxy(object_box, width, height)
-                padded_box = expand_bbox_xyxy(
-                    object_box, width, height, pad_ratio=self.pad_ratio
-                )
-                composed = composite_on_white(image_np, mask)
-                crop = crop_rgb(composed, padded_box)
-                if crop.size == 0:
-                    continue
-
-                item_name = f"item_{len(items)}.jpg"
-                item_path = output_dir / item_name
-                Image.fromarray(crop).save(item_path, format="JPEG", quality=95)
-
-                mask_area = float((mask > 0).sum())
-                bbox_area = float(
-                    (object_box[2] - object_box[0]) * (object_box[3] - object_box[1])
-                )
-                confidence = 0.0 if bbox_area <= 0 else min(1.0, mask_area / bbox_area)
-                meta_item = GpuMetaItem(
-                    item_image_path=item_name,
-                    bbox=bbox_xyxy_to_1000(object_box, width, height),
-                    is_fallback=False,
-                    confidence=round(confidence, 4),
-                )
-                items.append(meta_item)
-            except Exception as e:
-                self.logger.warning("Skip candidate %s due to error: %s", index, e)
+            object_box = mask_to_bbox_xyxy(mask)
+            if object_box is None:
+                self.logger.debug("Skip candidate %s due to empty mask.", index)
                 continue
+
+            object_box = clamp_bbox_xyxy(object_box, width, height)
+            padded_box = expand_bbox_xyxy(
+                object_box, width, height, pad_ratio=self.pad_ratio
+            )
+            composed = composite_on_white(image_np, mask)
+            crop = crop_rgb(composed, padded_box)
+            if crop.size == 0:
+                continue
+
+            item_name = f"item_{len(items)}.jpg"
+            item_path = output_dir / item_name
+            Image.fromarray(crop).save(item_path, format="JPEG", quality=95)
+
+            mask_area = float((mask > 0).sum())
+            bbox_area = float(
+                (object_box[2] - object_box[0]) * (object_box[3] - object_box[1])
+            )
+            confidence = 0.0 if bbox_area <= 0 else min(1.0, mask_area / bbox_area)
+            meta_item = GpuMetaItem(
+                item_image_path=item_name,
+                bbox=bbox_xyxy_to_1000(object_box, width, height),
+                is_fallback=False,
+                confidence=round(confidence, 4),
+            )
+            items.append(meta_item)
 
         return items
 
@@ -197,73 +190,44 @@ class MattingProcessor:
                     boxes.append(box)
 
         boxes = self._nms(boxes, iou_threshold=0.5)
-        if not boxes:
-            boxes = [self._fallback_center_box(image_rgb.width, image_rgb.height)]
         return boxes
 
     def _segment_box(self, image_rgb: Image.Image, box: BBoxXYXY) -> np.ndarray:
-        try:
-            # SAM expects input_boxes as a list of boxes in format [[x1, y1, x2, y2]]
-            # Note: box is already in (x1, y1, x2, y2) format
-            inputs = self._sam_processor(
-                image_rgb, input_boxes=[[box]], return_tensors="pt"
-            ).to(self.device)
+        # SAM expects input_boxes as a list of boxes in format [[x1, y1, x2, y2]]
+        inputs = self._sam_processor(
+            image_rgb, input_boxes=[[box]], return_tensors="pt"
+        ).to(self.device)
 
-            with torch.no_grad():
-                outputs = self._sam_model(**inputs)
+        with torch.no_grad():
+            outputs = self._sam_model(**inputs)
 
-            # Get the mask with highest IoU score
-            masks = outputs.pred_masks  # Shape: [batch, num_masks, H, W]
-            scores = outputs.iou_scores  # Shape: [batch, num_masks]
+        # Get masks and scores
+        masks = outputs.pred_masks  # Shape: [batch, num_masks, H, W]
+        scores = outputs.iou_scores  # Shape: [batch, num_masks]
 
-            # Handle case where no masks are generated
-            if masks is None or scores is None or masks.numel() == 0 or scores.numel() == 0:
-                self.logger.warning("SAM returned no masks, using fallback box mask")
-                h, w = image_rgb.height, image_rgb.width
-                mask = np.zeros((h, w), dtype=np.uint8)
-                x1, y1, x2, y2 = box
-                mask[y1:y2, x1:x2] = 255
-                return mask
+        # Remove batch dimension
+        masks = masks.squeeze(0)  # [num_masks, H, W]
+        scores = scores.squeeze(0)  # [num_masks]
 
-            # Squeeze and get best mask
-            masks = masks.squeeze(0)  # Remove batch dimension
-            scores = scores.squeeze(0)
+        # Pick the mask with highest IoU score
+        if masks.dim() == 2:
+            # Only one mask
+            mask = masks.cpu().numpy()
+        else:
+            # Multiple masks, pick the best one
+            best_mask_idx = scores.argmax()
+            mask = masks[best_mask_idx].cpu().numpy()
 
-            if masks.dim() == 2:
-                # Only one mask, use it directly
-                mask = masks.cpu().numpy()
-            else:
-                # Multiple masks, pick the best one
-                best_mask_idx = scores.argmax()
-                mask = masks[best_mask_idx].cpu().numpy()
+        # Resize mask to original image size if needed
+        if mask.shape != (image_rgb.height, image_rgb.width):
+            mask_img = Image.fromarray((mask * 255).astype(np.uint8))
+            mask_img = mask_img.resize(
+                (image_rgb.width, image_rgb.height), Image.Resampling.NEAREST
+            )
+            mask = np.array(mask_img) / 255.0
 
-            # Resize mask to original image size if needed
-            if mask.shape != (image_rgb.height, image_rgb.width):
-                mask_img = Image.fromarray((mask * 255).astype(np.uint8))
-                mask_img = mask_img.resize(
-                    (image_rgb.width, image_rgb.height), Image.Resampling.NEAREST
-                )
-                mask = np.array(mask_img) / 255.0
-
-            binary_mask = (mask > 0.5).astype(np.uint8) * 255
-            return binary_mask
-
-        except Exception as e:
-            self.logger.warning("SAM segmentation failed: %s, using fallback", e)
-            # Fallback: return a mask covering the entire box
-            h, w = image_rgb.height, image_rgb.width
-            mask = np.zeros((h, w), dtype=np.uint8)
-            x1, y1, x2, y2 = box
-            mask[y1:y2, x1:x2] = 255
-            return mask
-
-    @staticmethod
-    def _fallback_center_box(width: int, height: int) -> BBoxXYXY:
-        x1 = int(width * 0.1)
-        x2 = int(width * 0.9)
-        y1 = int(height * 0.05)
-        y2 = int(height * 0.95)
-        return x1, y1, x2, y2
+        binary_mask = (mask > 0.5).astype(np.uint8) * 255
+        return binary_mask
 
     @staticmethod
     def _nms(boxes: List[BBoxXYXY], iou_threshold: float = 0.5) -> List[BBoxXYXY]:
