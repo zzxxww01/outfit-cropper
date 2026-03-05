@@ -105,8 +105,19 @@ class MattingProcessor:
         self.load_models()
         ensure_dir(output_dir)
 
+        if image is None:
+            self.logger.warning("Step2 received None image input, skip.")
+            return []
+        if not isinstance(image, Image.Image):
+            raise TypeError(
+                f"Step2 expects PIL.Image.Image, got {type(image).__name__}."
+            )
+
         image_rgb = image.convert("RGB")
         image_np = np.asarray(image_rgb, dtype=np.uint8)
+        if image_np is None or image_np.ndim < 2:
+            self.logger.warning("Step2 got invalid image array, skip.")
+            return []
         height, width = image_np.shape[:2]
 
         candidate_boxes = self._detect_candidate_boxes(image_rgb)
@@ -116,7 +127,20 @@ class MattingProcessor:
 
         items: List[GpuMetaItem] = []
         for index, box in enumerate(candidate_boxes[: self.max_items]):
-            mask = self._segment_box(image_rgb, box)
+            try:
+                mask = self._segment_box(image_rgb, box)
+            except Exception as exc:
+                self.logger.warning("Skip candidate %s due to SAM error: %s", index, exc)
+                self.logger.debug("SAM candidate traceback", exc_info=True)
+                continue
+
+            if mask is None or mask.ndim != 2:
+                self.logger.warning(
+                    "Skip candidate %s due to invalid mask shape: %s",
+                    index,
+                    getattr(mask, "shape", None),
+                )
+                continue
 
             object_box = mask_to_bbox_xyxy(mask)
             if object_box is None:
@@ -155,38 +179,72 @@ class MattingProcessor:
         # Florence-2 task token must be used alone, no additional text
         prompt = "<OD>"
 
-        inputs = self._florence_processor(
+        raw_inputs = self._florence_processor(
             text=prompt, images=image_rgb, return_tensors="pt"
         )
 
-        # Move to device and convert pixel_values to float16
-        # Note: input_ids must remain as Long/Int for embedding layer
-        inputs = {
-            k: v.to(self.device, torch.float16) if k == "pixel_values" else v.to(self.device)
-            for k, v in inputs.items()
-            if isinstance(v, torch.Tensor)
-        }
+        model_inputs = {}
+        for key, value in raw_inputs.items():
+            if value is None or not isinstance(value, torch.Tensor):
+                continue
+            if key == "pixel_values":
+                model_inputs[key] = value.to(self.device, dtype=torch.float16)
+            else:
+                model_inputs[key] = value.to(self.device)
 
-        with torch.no_grad():
-            # Use the simplest generation config to avoid KV cache issues
-            generated_ids = self._florence_model.generate(
-                **inputs,
-                max_new_tokens=1024,
-                num_beams=1,
-                pad_token_id=self._florence_processor.tokenizer.pad_token_id,
+        if model_inputs.get("pixel_values") is None or model_inputs.get("input_ids") is None:
+            self.logger.warning(
+                "Florence inputs missing required tensors. keys=%s",
+                list(raw_inputs.keys()),
             )
+            return []
 
-        generated_text = self._florence_processor.batch_decode(
+        try:
+            with torch.no_grad():
+                # Use explicit args to avoid passing unsupported/malformed processor fields.
+                generated_ids = self._florence_model.generate(
+                    input_ids=model_inputs["input_ids"],
+                    pixel_values=model_inputs["pixel_values"],
+                    attention_mask=model_inputs.get("attention_mask"),
+                    max_new_tokens=1024,
+                    num_beams=1,
+                    pad_token_id=self._florence_processor.tokenizer.pad_token_id,
+                )
+        except Exception as exc:
+            self.logger.warning("Florence generate failed: %s", exc)
+            self.logger.debug("Florence generate traceback", exc_info=True)
+            return []
+
+        if generated_ids is None:
+            self.logger.warning("Florence generate returned None.")
+            return []
+
+        decoded = self._florence_processor.batch_decode(
             generated_ids, skip_special_tokens=False
-        )[0]
-        parsed_answer = self._florence_processor.post_process_generation(
-            generated_text, task=prompt, image_size=(image_rgb.width, image_rgb.height)
         )
+        if not decoded:
+            self.logger.warning("Florence decode returned empty output.")
+            return []
+
+        generated_text = decoded[0]
+        try:
+            parsed_answer = self._florence_processor.post_process_generation(
+                generated_text,
+                task=prompt,
+                image_size=(image_rgb.width, image_rgb.height),
+            )
+        except Exception as exc:
+            self.logger.warning("Florence post-process failed: %s", exc)
+            self.logger.debug("Florence post-process traceback", exc_info=True)
+            return []
+        if parsed_answer is None:
+            self.logger.warning("Florence post-process returned None.")
+            return []
 
         boxes = []
         min_area = image_rgb.width * image_rgb.height * self.min_box_area_ratio
 
-        if "<OD>" in parsed_answer and "bboxes" in parsed_answer["<OD>"]:
+        if isinstance(parsed_answer, dict) and "<OD>" in parsed_answer and "bboxes" in parsed_answer["<OD>"]:
             for bbox in parsed_answer["<OD>"]["bboxes"]:
                 x1, y1, x2, y2 = bbox
                 box = clamp_bbox_xyxy(
@@ -202,6 +260,8 @@ class MattingProcessor:
         return boxes
 
     def _segment_box(self, image_rgb: Image.Image, box: BBoxXYXY) -> np.ndarray:
+        empty_mask = np.zeros((image_rgb.height, image_rgb.width), dtype=np.uint8)
+
         # SAM expects input_boxes in format (batch_size, num_boxes, 4) with (x1, y1, x2, y2)
         # box is already (x1, y1, x2, y2), wrap it properly
         inputs = self._sam_processor(
@@ -213,21 +273,85 @@ class MattingProcessor:
         with torch.no_grad():
             outputs = self._sam_model(**inputs)
 
-        # Post-process masks to original image size
-        masks = self._sam_processor.image_processor.post_process_masks(
-            outputs.pred_masks.cpu(),
-            inputs["original_sizes"].cpu(),
-            inputs["reshaped_input_sizes"].cpu()
+        pred_masks = getattr(outputs, "pred_masks", None)
+        iou_scores = getattr(outputs, "iou_scores", None)
+        if pred_masks is None or iou_scores is None:
+            self.logger.warning(
+                "SAM returned empty outputs for box=%s (pred_masks=%s, iou_scores=%s).",
+                box,
+                pred_masks is not None,
+                iou_scores is not None,
+            )
+            return empty_mask
+
+        original_sizes = inputs.get("original_sizes")
+        reshaped_input_sizes = inputs.get("reshaped_input_sizes")
+        if original_sizes is None or reshaped_input_sizes is None:
+            self.logger.warning(
+                "SAM processor missing size tensors for box=%s (keys=%s).",
+                box,
+                list(inputs.keys()),
+            )
+            return empty_mask
+
+        pred_masks_cpu = pred_masks.detach().cpu()
+        iou_scores_cpu = iou_scores.detach().cpu()
+        original_sizes_cpu = (
+            original_sizes.detach().cpu()
+            if isinstance(original_sizes, torch.Tensor)
+            else original_sizes
+        )
+        reshaped_input_sizes_cpu = (
+            reshaped_input_sizes.detach().cpu()
+            if isinstance(reshaped_input_sizes, torch.Tensor)
+            else reshaped_input_sizes
         )
 
-        # masks is a list of tensors, get the first image's masks
-        # Shape: [1, num_masks, H, W]
-        masks = masks[0].squeeze(0)  # [num_masks, H, W]
-        scores = outputs.iou_scores.squeeze(0).cpu()  # [num_masks]
+        # Post-process masks to original image size
+        masks = self._sam_processor.image_processor.post_process_masks(
+            pred_masks_cpu,
+            original_sizes_cpu,
+            reshaped_input_sizes_cpu,
+            return_tensors="pt",
+        )
+
+        if isinstance(masks, list):
+            if not masks or masks[0] is None:
+                self.logger.warning("SAM produced empty post-processed masks for box=%s.", box)
+                return empty_mask
+            masks = masks[0]
+        if not isinstance(masks, torch.Tensor):
+            self.logger.warning("Unsupported SAM mask type for box=%s: %s", box, type(masks))
+            return empty_mask
+
+        # Normalize to [num_masks, H, W].
+        if masks.ndim == 4:
+            masks = masks[0]
+        elif masks.ndim == 2:
+            masks = masks.unsqueeze(0)
+        elif masks.ndim != 3:
+            self.logger.warning("Unexpected SAM mask ndim=%s for box=%s.", masks.ndim, box)
+            return empty_mask
 
         # Pick the mask with highest IoU score
-        best_mask_idx = scores.argmax()
+        scores = iou_scores_cpu
+        while scores.ndim > 1:
+            scores = scores[0]
+        if scores.numel() == 0 or masks.shape[0] == 0:
+            self.logger.warning("Empty SAM scores/masks for box=%s.", box)
+            return empty_mask
+        best_mask_idx = int(scores.argmax().item())
+        if best_mask_idx >= masks.shape[0]:
+            best_mask_idx = int(masks.shape[0] - 1)
         mask = masks[best_mask_idx].numpy()  # [H, W]
+
+        if mask.shape != (image_rgb.height, image_rgb.width):
+            mask_img = Image.fromarray((mask > 0).astype(np.uint8) * 255)
+            mask_img = mask_img.resize(
+                (image_rgb.width, image_rgb.height),
+                Image.Resampling.NEAREST,
+            )
+            return np.asarray(mask_img, dtype=np.uint8)
 
         # Convert to binary mask
         binary_mask = (mask > 0.5).astype(np.uint8) * 255
