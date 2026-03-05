@@ -68,10 +68,22 @@ class MattingProcessor:
         self._florence_model = AutoModelForCausalLM.from_pretrained(
             florence_path,
             trust_remote_code=True,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
             attn_implementation="eager",
             device_map=None,  # Don't use device_map, manually move to device
         ).to(self.device).eval()
+        # Some Florence checkpoints ship generation_config with beam-only flags enabled.
+        # Normalize to our single-beam setup to avoid noisy validation warnings.
+        for cfg_owner in (
+            self._florence_model,
+            getattr(self._florence_model, "language_model", None),
+        ):
+            if cfg_owner is None:
+                continue
+            generation_config = getattr(cfg_owner, "generation_config", None)
+            if generation_config is None:
+                continue
+            generation_config.early_stopping = False
 
         self.logger.info("Loading SAM Model...")
         sam_path = self.checkpoints_dir / "sam"
@@ -205,6 +217,7 @@ class MattingProcessor:
             "max_new_tokens": 1024,
             "do_sample": False,
             "num_beams": 1,
+            "early_stopping": False,
             "use_cache": False,
             "pad_token_id": self._florence_processor.tokenizer.pad_token_id,
         }

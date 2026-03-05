@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import warnings
 
 import numpy as np
 from PIL import Image
@@ -16,6 +17,12 @@ try:
     import cv2
 except Exception:  # pragma: no cover
     cv2 = None
+
+# Surya currently emits this deprecation warning from internal calls.
+warnings.filterwarnings(
+    "ignore",
+    message=r"`torch_dtype` is deprecated! Use `dtype` instead!",
+)
 
 
 class InpaintingProcessor:
