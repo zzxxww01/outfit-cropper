@@ -194,32 +194,48 @@ class MattingProcessor:
 
     def _segment_box(self, image_rgb: Image.Image, box: BBoxXYXY) -> np.ndarray:
         # SAM expects input_boxes as a list of boxes in format [[x1, y1, x2, y2]]
+        self.logger.debug(f"Segmenting box: {box}, image size: {image_rgb.size}")
+
         inputs = self._sam_processor(
             image_rgb, input_boxes=[[box]], return_tensors="pt"
         ).to(self.device)
 
+        self.logger.debug(f"SAM inputs keys: {inputs.keys()}")
+        self.logger.debug(f"SAM input_boxes shape: {inputs.get('input_boxes', 'N/A')}")
+
         with torch.no_grad():
             outputs = self._sam_model(**inputs)
+
+        self.logger.debug(f"SAM outputs type: {type(outputs)}")
+        self.logger.debug(f"SAM outputs attributes: {dir(outputs)}")
 
         # Get masks and scores
         masks = outputs.pred_masks  # Shape: [batch, num_masks, H, W]
         scores = outputs.iou_scores  # Shape: [batch, num_masks]
 
+        self.logger.debug(f"masks type: {type(masks)}, shape: {masks.shape if masks is not None else 'None'}")
+        self.logger.debug(f"scores type: {type(scores)}, shape: {scores.shape if scores is not None else 'None'}")
+
         # Remove batch dimension
         masks = masks.squeeze(0)  # [num_masks, H, W]
         scores = scores.squeeze(0)  # [num_masks]
+
+        self.logger.debug(f"After squeeze - masks shape: {masks.shape}, scores shape: {scores.shape}")
 
         # Pick the mask with highest IoU score
         if masks.dim() == 2:
             # Only one mask
             mask = masks.cpu().numpy()
+            self.logger.debug(f"Single mask case, shape: {mask.shape}")
         else:
             # Multiple masks, pick the best one
             best_mask_idx = scores.argmax()
             mask = masks[best_mask_idx].cpu().numpy()
+            self.logger.debug(f"Multiple masks case, best_idx: {best_mask_idx}, shape: {mask.shape}")
 
         # Resize mask to original image size if needed
         if mask.shape != (image_rgb.height, image_rgb.width):
+            self.logger.debug(f"Resizing mask from {mask.shape} to ({image_rgb.height}, {image_rgb.width})")
             mask_img = Image.fromarray((mask * 255).astype(np.uint8))
             mask_img = mask_img.resize(
                 (image_rgb.width, image_rgb.height), Image.Resampling.NEAREST
@@ -227,6 +243,7 @@ class MattingProcessor:
             mask = np.array(mask_img) / 255.0
 
         binary_mask = (mask > 0.5).astype(np.uint8) * 255
+        self.logger.debug(f"Final binary_mask shape: {binary_mask.shape}, non-zero pixels: {np.count_nonzero(binary_mask)}")
         return binary_mask
 
     @staticmethod
