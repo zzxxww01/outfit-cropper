@@ -65,13 +65,17 @@ class MattingProcessor:
         self._florence_processor = AutoProcessor.from_pretrained(
             florence_path, trust_remote_code=True
         )
-        self._florence_model = AutoModelForCausalLM.from_pretrained(
-            florence_path,
-            trust_remote_code=True,
-            dtype=torch.float16,
-            attn_implementation="eager",
-            device_map=None,  # Don't use device_map, manually move to device
-        ).to(self.device).eval()
+        self._florence_model = (
+            AutoModelForCausalLM.from_pretrained(
+                florence_path,
+                trust_remote_code=True,
+                dtype=torch.float16,
+                attn_implementation="eager",
+                device_map=None,  # Don't use device_map, manually move to device
+            )
+            .to(self.device)
+            .eval()
+        )
         # Some Florence checkpoints ship generation_config with beam-only flags enabled.
         # Normalize to our single-beam setup to avoid noisy validation warnings.
         for cfg_owner in (
@@ -142,7 +146,9 @@ class MattingProcessor:
             try:
                 mask = self._segment_box(image_rgb, box)
             except Exception as exc:
-                self.logger.warning("Skip candidate %s due to SAM error: %s", index, exc)
+                self.logger.warning(
+                    "Skip candidate %s due to SAM error: %s", index, exc
+                )
                 self.logger.debug("SAM candidate traceback", exc_info=True)
                 continue
 
@@ -188,8 +194,10 @@ class MattingProcessor:
         return items
 
     def _detect_candidate_boxes(self, image_rgb: Image.Image) -> List[BBoxXYXY]:
-        # Florence-2 task token must be used alone, no additional text
-        prompt = "<OD>"
+        task_prompt = "<CAPTION_TO_PHRASE_GROUNDING>"
+        # Use common words mapped to the 8 ItemTypeEnum categories
+        text_input = "outerwear, jacket, coat, top, shirt, t-shirt, bottom, pants, skirt, shorts, one-piece dress, shoes, sneakers, boots, bag, handbag, backpack, accessories, hat, glasses, belt"
+        prompt = task_prompt + text_input
 
         raw_inputs = self._florence_processor(
             text=prompt, images=image_rgb, return_tensors="pt"
@@ -204,7 +212,10 @@ class MattingProcessor:
             else:
                 model_inputs[key] = value.to(self.device)
 
-        if model_inputs.get("pixel_values") is None or model_inputs.get("input_ids") is None:
+        if (
+            model_inputs.get("pixel_values") is None
+            or model_inputs.get("input_ids") is None
+        ):
             self.logger.warning(
                 "Florence inputs missing required tensors. keys=%s",
                 list(raw_inputs.keys()),
@@ -248,7 +259,7 @@ class MattingProcessor:
         try:
             parsed_answer = self._florence_processor.post_process_generation(
                 generated_text,
-                task=prompt,
+                task=task_prompt,
                 image_size=(image_rgb.width, image_rgb.height),
             )
         except Exception as exc:
@@ -262,17 +273,19 @@ class MattingProcessor:
         boxes = []
         min_area = image_rgb.width * image_rgb.height * self.min_box_area_ratio
 
-        if isinstance(parsed_answer, dict) and "<OD>" in parsed_answer and "bboxes" in parsed_answer["<OD>"]:
-            for bbox in parsed_answer["<OD>"]["bboxes"]:
-                x1, y1, x2, y2 = bbox
-                box = clamp_bbox_xyxy(
-                    (int(x1), int(y1), int(x2), int(y2)),
-                    image_rgb.width,
-                    image_rgb.height,
-                )
-                area = (box[2] - box[0]) * (box[3] - box[1])
-                if area >= min_area:
-                    boxes.append(box)
+        if isinstance(parsed_answer, dict) and task_prompt in parsed_answer:
+            grounding_data = parsed_answer[task_prompt]
+            if "bboxes" in grounding_data:
+                for bbox in grounding_data["bboxes"]:
+                    x1, y1, x2, y2 = bbox
+                    box = clamp_bbox_xyxy(
+                        (int(x1), int(y1), int(x2), int(y2)),
+                        image_rgb.width,
+                        image_rgb.height,
+                    )
+                    area = (box[2] - box[0]) * (box[3] - box[1])
+                    if area >= min_area:
+                        boxes.append(box)
 
         boxes = self._nms(boxes, iou_threshold=0.5)
         return boxes
@@ -285,7 +298,7 @@ class MattingProcessor:
         inputs = self._sam_processor(
             image_rgb,
             input_boxes=[[[box[0], box[1], box[2], box[3]]]],
-            return_tensors="pt"
+            return_tensors="pt",
         ).to(self.device)
 
         with torch.no_grad():
@@ -335,11 +348,15 @@ class MattingProcessor:
 
         if isinstance(masks, list):
             if not masks or masks[0] is None:
-                self.logger.warning("SAM produced empty post-processed masks for box=%s.", box)
+                self.logger.warning(
+                    "SAM produced empty post-processed masks for box=%s.", box
+                )
                 return empty_mask
             masks = masks[0]
         if not isinstance(masks, torch.Tensor):
-            self.logger.warning("Unsupported SAM mask type for box=%s: %s", box, type(masks))
+            self.logger.warning(
+                "Unsupported SAM mask type for box=%s: %s", box, type(masks)
+            )
             return empty_mask
 
         # Normalize to [num_masks, H, W].
@@ -348,7 +365,9 @@ class MattingProcessor:
         elif masks.ndim == 2:
             masks = masks.unsqueeze(0)
         elif masks.ndim != 3:
-            self.logger.warning("Unexpected SAM mask ndim=%s for box=%s.", masks.ndim, box)
+            self.logger.warning(
+                "Unexpected SAM mask ndim=%s for box=%s.", masks.ndim, box
+            )
             return empty_mask
 
         # Pick the mask with highest IoU score
