@@ -160,10 +160,12 @@ class MattingProcessor:
             text=prompt, images=image_rgb, return_tensors="pt"
         )
 
-        # Move inputs to device and convert to model's dtype (float16)
+        # Move to device and convert pixel_values to float16
+        # Note: input_ids must remain as Long/Int for embedding layer
         inputs = {
-            k: v.to(self.device, torch.float16) if isinstance(v, torch.Tensor) else v
+            k: v.to(self.device, torch.float16) if k == "pixel_values" else v.to(self.device)
             for k, v in inputs.items()
+            if isinstance(v, torch.Tensor)
         }
 
         with torch.no_grad():
