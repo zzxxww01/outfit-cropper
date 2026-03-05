@@ -60,19 +60,18 @@ class MattingProcessor:
         florence_path = self.checkpoints_dir / "florence"
         if not florence_path.exists():
             florence_path = "microsoft/Florence-2-base"
+
+        # Load with explicit config to avoid cached module issues
         self._florence_processor = AutoProcessor.from_pretrained(
             florence_path, trust_remote_code=True
         )
-        self._florence_model = (
-            AutoModelForCausalLM.from_pretrained(
-                florence_path,
-                trust_remote_code=True,
-                torch_dtype=torch.float16,
-                attn_implementation="eager",  # Disable SDPA to avoid compatibility issues
-            )
-            .to(self.device)
-            .eval()
-        )
+        self._florence_model = AutoModelForCausalLM.from_pretrained(
+            florence_path,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            attn_implementation="eager",
+            device_map=None,  # Don't use device_map, manually move to device
+        ).to(self.device).eval()
 
         self.logger.info("Loading SAM Model...")
         sam_path = self.checkpoints_dir / "sam"
@@ -169,11 +168,12 @@ class MattingProcessor:
         }
 
         with torch.no_grad():
+            # Use the simplest generation config to avoid KV cache issues
             generated_ids = self._florence_model.generate(
-                input_ids=inputs["input_ids"],
-                pixel_values=inputs["pixel_values"],
+                **inputs,
                 max_new_tokens=1024,
                 num_beams=1,
+                pad_token_id=self._florence_processor.tokenizer.pad_token_id,
             )
 
         generated_text = self._florence_processor.batch_decode(
