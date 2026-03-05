@@ -13,15 +13,10 @@ class ModelSpec:
 
 
 MODEL_SPECS: dict[str, ModelSpec] = {
-    "florence": ModelSpec(
-        name="florence",
-        repo_id="microsoft/Florence-2-base",
-        note="Open-vocabulary detection backbone for Step2.",
-    ),
-    "sam": ModelSpec(
-        name="sam",
-        repo_id="facebook/sam-vit-base",
-        note="Segmentation model backbone for Step2.",
+    "yolo": ModelSpec(
+        name="yolo",
+        repo_id="Bingsu/adetailer",  # A known repo that hosts the deepfashion2_yolov8s-seg.pt file
+        note="YOLOv8-Seg (DeepFashion2) model backbone for Step2.",
     ),
     "inpaint": ModelSpec(
         name="inpaint",
@@ -44,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         type=str,
-        default="surya,florence,sam,inpaint",
+        default="surya,yolo,inpaint",
         help="Comma separated model names.",
     )
     parser.add_argument("--force", action="store_true", help="Force redownload.")
@@ -52,7 +47,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def _download_hf_repo(repo_id: str, target_dir: Path, force: bool) -> None:
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import hf_hub_download, snapshot_download
+
+    if repo_id == "Bingsu/adetailer":
+        # Only download the specific YOLO file we need instead of the entire repo
+        file_path = hf_hub_download(
+            repo_id=repo_id,
+            filename="deepfashion2_yolov8s-seg.pt",
+            local_dir=str(target_dir),
+            local_dir_use_symlinks=False,
+            force_download=force,
+        )
+        return
 
     snapshot_download(
         repo_id=repo_id,
