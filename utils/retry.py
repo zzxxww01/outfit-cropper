@@ -27,6 +27,7 @@ def run_with_retries(
                 raise
             sleep_seconds = base_delay_seconds * (2 ** (attempt - 1))
             if logger is not None:
+                import traceback
                 logger.warning(
                     "%s failed on attempt %s/%s: %s. Retrying in %.1fs",
                     step_name,
@@ -35,5 +36,6 @@ def run_with_retries(
                     exc,
                     sleep_seconds,
                 )
+                logger.debug("Full traceback:\n%s", traceback.format_exc())
             time.sleep(sleep_seconds)
 
