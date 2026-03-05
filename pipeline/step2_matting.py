@@ -194,25 +194,37 @@ class MattingProcessor:
         return boxes
 
     def _segment_box(self, image_rgb: Image.Image, box: BBoxXYXY) -> np.ndarray:
-        # SAM expects input_boxes as [[x1, y1, x2, y2]]
+        # SAM expects input_boxes as a list of boxes in format [[x1, y1, x2, y2]]
+        # Note: box is already in (x1, y1, x2, y2) format
         inputs = self._sam_processor(
-            image_rgb, input_boxes=[[[box]]], return_tensors="pt"
+            image_rgb, input_boxes=[[box]], return_tensors="pt"
         ).to(self.device)
 
         with torch.no_grad():
             outputs = self._sam_model(**inputs)
 
         # Get the mask with highest IoU score
-        masks = outputs.pred_masks.squeeze(1)
-        scores = outputs.iou_scores.squeeze(1)
-        best_mask_idx = scores.argmax()
+        masks = outputs.pred_masks.squeeze(1)  # Shape: [batch, num_masks, H, W]
+        scores = outputs.iou_scores.squeeze(1)  # Shape: [batch, num_masks]
 
+        # Handle case where no masks are generated
+        if masks.numel() == 0 or scores.numel() == 0:
+            # Fallback: return a mask covering the entire box
+            h, w = image_rgb.height, image_rgb.width
+            mask = np.zeros((h, w), dtype=np.uint8)
+            x1, y1, x2, y2 = box
+            mask[y1:y2, x1:x2] = 255
+            return mask
+
+        best_mask_idx = scores.argmax()
         mask = masks[0, best_mask_idx].cpu().numpy()
 
         # Resize mask to original image size if needed
         if mask.shape != (image_rgb.height, image_rgb.width):
             mask_img = Image.fromarray((mask * 255).astype(np.uint8))
-            mask_img = mask_img.resize((image_rgb.width, image_rgb.height), Image.Resampling.NEAREST)
+            mask_img = mask_img.resize(
+                (image_rgb.width, image_rgb.height), Image.Resampling.NEAREST
+            )
             mask = np.array(mask_img) / 255.0
 
         binary_mask = (mask > 0.5).astype(np.uint8) * 255
