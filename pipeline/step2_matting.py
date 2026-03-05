@@ -67,7 +67,8 @@ class MattingProcessor:
             AutoModelForCausalLM.from_pretrained(
                 florence_path,
                 trust_remote_code=True,
-                attn_implementation="eager"  # Disable SDPA to avoid compatibility issues
+                torch_dtype=torch.float16,
+                attn_implementation="eager",  # Disable SDPA to avoid compatibility issues
             )
             .to(self.device)
             .eval()
@@ -165,6 +166,9 @@ class MattingProcessor:
                 pixel_values=inputs["pixel_values"],
                 max_new_tokens=1024,
                 num_beams=3,
+                early_stopping=False,
+                do_sample=False,
+                use_cache=True,
             )
 
         generated_text = self._florence_processor.batch_decode(
