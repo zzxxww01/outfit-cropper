@@ -205,40 +205,20 @@ class MattingProcessor:
             "max_new_tokens": 1024,
             "do_sample": False,
             "num_beams": 1,
-            "early_stopping": False,
+            "use_cache": False,
             "pad_token_id": self._florence_processor.tokenizer.pad_token_id,
         }
         attention_mask = model_inputs.get("attention_mask")
         if attention_mask is not None:
             generate_base_kwargs["attention_mask"] = attention_mask
 
-        generate_attempts = [
-            ("default", {}),
-            # Florence-2 custom code can hit a KV-cache bug in some envs.
-            ("no_cache", {"use_cache": False}),
-            ("beam_no_cache", {"use_cache": False, "num_beams": 3, "early_stopping": True}),
-        ]
-        generated_ids = None
-        for attempt_name, attempt_kwargs in generate_attempts:
-            try:
-                with torch.no_grad():
-                    generated_ids = self._florence_model.generate(
-                        **generate_base_kwargs,
-                        **attempt_kwargs,
-                    )
-                if generated_ids is not None:
-                    break
-            except Exception as exc:
-                self.logger.warning(
-                    "Florence generate (%s) failed: %s",
-                    attempt_name,
-                    exc,
-                )
-                self.logger.debug(
-                    "Florence generate (%s) traceback",
-                    attempt_name,
-                    exc_info=True,
-                )
+        try:
+            with torch.no_grad():
+                generated_ids = self._florence_model.generate(**generate_base_kwargs)
+        except Exception as exc:
+            self.logger.warning("Florence generate failed (use_cache=False): %s", exc)
+            self.logger.debug("Florence generate traceback", exc_info=True)
+            return []
 
         if generated_ids is None:
             self.logger.warning("Florence generate returned None.")
