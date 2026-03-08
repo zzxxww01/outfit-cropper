@@ -1,0 +1,86 @@
+Positive Prompt:
+
+object extraction task, dataset extraction, object replication, not creative generation.
+
+strict fashion item extraction from the reference image. replicate ONLY the fashion items that are clearly and fully visible in the reference image.
+
+CRITICAL RULES:
+
+- Do NOT invent items
+- Do NOT hallucinate items
+- Do NOT duplicate items
+- Do NOT guess missing items
+- If an item is uncertain or partially visible, DO NOT generate it
+- The number of extracted items must exactly match the number of clearly visible items in the reference image
+
+Allowed categories ONLY:
+
+Outerwear: coats, jackets, blazers, trench coats, cardigans.
+
+Top: t-shirts, shirts, sweaters, hoodies, tank tops, camisoles.
+
+Bottom: pants, jeans, trousers, shorts, skirts.
+
+One-piece: dresses, jumpsuits, rompers.
+
+Shoes: sneakers, leather shoes, boots, sandals  
+ONLY if both shoes are clearly visible in the original image.  
+If shoes are partially visible or uncertain, DO NOT generate shoes.
+
+Bag: shoulder bags, crossbody bags, handbags, backpacks.
+
+Accessories (VERY STRICT LIMIT):
+
+hats, belts, scarves, sunglasses, jewelry.
+
+Jewelry ONLY if clearly visible as a distinct metallic necklace or earrings.  
+If the jewelry is small, ambiguous, partially hidden, or unclear, DO NOT generate it.
+
+Straps, cords, phone straps, badge straps, badge holders, and lanyards are NOT jewelry.
+
+IGNORE all other items even if they appear in the image.
+
+Each extracted item must keep the exact structure and design of the original item.
+Preserve silhouette, collar shape, sleeves, stitching, materials and design details.
+
+Layout rules:
+
+pure top-down flat lay  
+seamless pure white background  
+items completely separated  
+large spacing between items  
+non-symmetrical layout  
+irregular natural spacing  
+
+minimal soft shadow, high resolution, clean e-commerce catalog image.
+
+
+Negative Prompt:
+
+fashion completion
+
+socks, ankle socks, crew socks, long socks, stockings, tights, pantyhose, leg warmers
+
+extra shoes, invented shoes, hallucinated shoes, guessed shoes
+
+small jewelry, unclear jewelry, ambiguous jewelry
+
+duplicate objects, duplicated bags, repeated accessories
+
+lanyard, phone strap, phone lanyard, neck strap, badge strap, badge holder, ID lanyard
+
+phone, smartphone, electronics
+
+cup, coffee, milk tea, beverage, drink
+
+random handheld props, unrelated objects
+
+humans, person, model, mannequin
+
+body parts, hands, arms, legs, face
+
+hanger, rack
+
+text, watermark, logo, border, grid lines
+
+generic clothing, altered clothing, different clothing

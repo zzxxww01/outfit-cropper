@@ -1,0 +1,4 @@
+pillow>=10.0
+python-dotenv>=1.0
+numpy>=1.26
+opencv-python>=4.10

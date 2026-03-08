@@ -1,90 +1,57 @@
-# outfit-cropper (Phase 1 Milestone)
+# outfit-cropper
 
-离线服装抠图批处理项目。当前里程碑只实现 **Phase 1 (GPU 视觉处理)**，Phase 2 的 Gemini 分类保留 TODO。
+当前仓库只保留一条主链路：
 
-## Current Scope
+1. 用 Gemini API 基于原图生成一张 flatlay 图
+2. 对 flatlay 图做纯 `mask-first` 单品切图
+3. 生成 `review.html` 做人工检查
 
-- Implemented:
-  - `gpu_batch_process.py` (Step1 + Step2 + Step3)
-  - Step1: OCR-like text mask + inpainting fallback
-  - Step2: candidate detection + segmentation fallback
-  - Step3: white-background composite + 10% padding crop + `meta.json`
-  - `download_weights.py` for Phase1 weight bootstrap
-- TODO:
-  - `gcp_batch_process.py` Gemini Structured Outputs classification
-  - Final `result.json` assembly with `item_type`
+完整链路文档见：
 
-## Directory Contract
+- [docs/full-chain.md](/C:/Users/DELL/Desktop/outfit-cropper/docs/full-chain.md)
 
-```text
-input_images/
-  xhs_12345.jpg
+## Current Models
 
-gpu_output/
-  xhs_12345/
-    item_0.jpg
-    item_1.jpg
-    meta.json
-  error_report.json
-```
+- 生图模型：`gemini-3.1-flash-image-preview`
+- 当前 prompt：`prompts/flatlay_v9.txt`
+- 切图阶段：不使用 YOLO，不使用其他检测模型，使用 `OpenCV + GrabCut` 的 `mask-first` 方案
 
-`meta.json`:
+## Main Entrypoints
 
-```json
-{
-  "outfit_id": "xhs_12345",
-  "items": [
-    {
-      "item_image_path": "item_0.jpg",
-      "bbox": [277.78, 260.42, 833.33, 470.83],
-      "is_fallback": false,
-      "confidence": 0.91
-    }
-  ]
-}
-```
-
-## Quick Start
-
-1. Install GPU dependencies:
+生成 flatlay：
 
 ```bash
-pip install -r requirements_gpu.txt
+python api_pilot.py --input-dir normal_1068807_1070000 --output-dir pilot_output --sample-size 100 --round-id round_100_v9_debug --prompt-version v9
 ```
 
-2. Download weights:
+切 flatlay 单品：
 
 ```bash
-python download_weights.py --checkpoints-dir checkpoints
+python segment_flatlay_mask.py --round-dir pilot_output/round_100_v9_debug --output-dir pilot_output/round_100_v9_debug_extract_mask_padded
 ```
 
-3. Put `.jpg` images into `input_images/`, then run:
+生成 review 页面：
 
 ```bash
-python gpu_batch_process.py --input-dir input_images --output-dir gpu_output --checkpoints-dir checkpoints
+python build_debug_review_page.py --round-dir pilot_output/round_100_v9_debug_extract_mask_padded --title "round_100_v9 mask-first padded review"
 ```
 
-## Memory Safety Redline
+## Main Files
 
-The pipeline enforces explicit release between Step1 and Step2:
+- `api_pilot.py`
+- `segment_flatlay_mask.py`
+- `build_debug_review_page.py`
+- `pipeline/nano_banana_client.py`
+- `pipeline/prompt_loader.py`
+- `pipeline/sample_selector.py`
+- `pipeline/flatlay_segmenter.py`
+- `pipeline/flatlay_mask_extractor.py`
+- `prompts/flatlay_v9.txt`
 
-- `del step1 model objects`
-- `gc.collect()`
-- `torch.cuda.empty_cache()`
+## Notes
 
-This is required to reduce OOM risk on 16/32GB V100.
-
-## Failure Policy
-
-- Retry each critical step up to `1 + --max-retries` attempts.
-- If one image still fails, write empty `meta.json` for that outfit and continue batch.
-- Final batch errors are summarized in `gpu_output/error_report.json`.
-
-## Phase 2 Placeholder
-
-`gcp_batch_process.py` is intentionally a TODO stub. It currently creates:
-
-- `results/result.todo.json`
-
-with `status=todo_phase2`.
-
+- 生产切图依据是 `mask`，不是 `bbox`
+- `meta.json` 中的 `bbox_xyxy` 只用于调试和排序
+- 当前默认导出会给透明 PNG 加 padding：
+  - `pad_ratio=0.08`
+  - `min_pad_px=24`
