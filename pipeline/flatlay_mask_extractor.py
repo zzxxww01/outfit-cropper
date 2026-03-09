@@ -28,6 +28,14 @@ class MaskExtractedItem:
     preview_crop: Image.Image
     source_method: str = "mask_seg_flatlay"
     group_type: str = "single"
+    class_name: str = "Unknown"
+    class_confidence: float = 0.0
+    classification_stage: str = ""
+    top_scores: Dict[str, float] | None = None
+    stage2_triggered: bool = False
+    topology_reranked: bool = False
+    decision_reason: str = ""
+    shape_features: Dict[str, float] | None = None
     merged_from: List[str] | None = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -38,7 +46,23 @@ class MaskExtractedItem:
             "area_ratio": round(self.area_ratio, 6),
             "source_method": self.source_method,
             "group_type": self.group_type,
+            "class_name": self.class_name,
+            "class_confidence": round(self.class_confidence, 6),
         }
+        if self.classification_stage:
+            data["classification_stage"] = self.classification_stage
+        if self.top_scores:
+            data["top_scores"] = {name: round(score, 6) for name, score in self.top_scores.items()}
+        if self.stage2_triggered:
+            data["stage2_triggered"] = True
+        if self.topology_reranked:
+            data["topology_reranked"] = True
+        if self.decision_reason:
+            data["decision_reason"] = self.decision_reason
+        if self.shape_features:
+            data["shape_features"] = {
+                name: round(value, 6) for name, value in self.shape_features.items()
+            }
         if self.merged_from:
             data["merged_from"] = list(self.merged_from)
         return data

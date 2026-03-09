@@ -1,206 +1,223 @@
 # Full Chain
 
-## Scope
+## 项目概览
 
-当前仓库只保留以下链路：
+当前项目把人物穿搭图转成一张干净的 flatlay 图，再从这张 flatlay 图里切出每件单品，并补上 8 类分类结果。
 
-`原始人物图 -> Gemini flatlay 生图 -> mask-first 切图 -> review.html`
+完整链路：
 
-不再保留：
+`原始人物图 -> flatlay 生图 -> mask-first 切图 -> OpenCLIP 初判 -> SigLIP 二判 -> topology 规则裁决 -> review.html`
 
-- YOLO / DeepFashion2 提取链路
-- 本地 GPU inpainting / matting 老链路
-- GCP 占位脚本
-- 旧 prompt 版本和旧工作流文档
+## 当前效果
 
-## Models And Methods
+- flatlay 生图使用固定 prompt 和固定温度，风格稳定
+- 单品切图以 `mask` 为真值，导出透明 PNG
+- 导出单品图会自动补透明 padding
+- 每个单品会带 8 类分类结果
+- 对 `Bottom / One_piece / Top` 的混淆，当前使用二阶段分类和 topology 规则做专门收敛
+- review 页面可同时查看原图、flatlay 和所有切图结果
 
-### 1. Generation
+## 当前模型与方法
+
+### 1. 生图阶段
 
 - 模型：`gemini-3.1-flash-image-preview`
 - 调用方式：Gemini REST API
-- 客户端文件：[pipeline/nano_banana_client.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/nano_banana_client.py)
-- 入口脚本：[api_pilot.py](/C:/Users/DELL/Desktop/outfit-cropper/api_pilot.py)
-- 当前 prompt：[prompts/flatlay_v9.txt](/C:/Users/DELL/Desktop/outfit-cropper/prompts/flatlay_v9.txt)
+- 当前 prompt：`prompts/flatlay_v9.txt`
+- 默认温度：`0.2`
 
-说明：
+相关文件：
 
-- 这里的图像生成阶段是唯一使用大模型的环节。
-- 当前默认 `temperature=0.2`。
+- [api_pilot.py](/C:/Users/DELL/Desktop/outfit-cropper/api_pilot.py)
+- [pipeline/nano_banana_client.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/nano_banana_client.py)
+- [pipeline/prompt_loader.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/prompt_loader.py)
+- [pipeline/sample_selector.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/sample_selector.py)
 
-### 2. Extraction
+### 2. 切图阶段
 
-- 不使用 YOLO
-- 不使用 SAM
-- 不使用 DeepFashion2
-- 当前使用的是经典 CV 方案：
-  - 背景估计
-  - LAB 空间前景分离
-  - 连通域候选框
-  - 局部 GrabCut 精修
-  - 基于 mask 的透明 PNG 导出
+切图阶段使用 `mask-first` 方法：
 
-核心文件：
+- 背景估计
+- LAB 空间前景分离
+- 连通域候选提取
+- 局部 GrabCut 精修
+- 基于 mask 导出透明 PNG
 
+切图后的后处理包括：
+
+- 去除微小噪点
+- 合并一双鞋
+- 合并明显成对的小配饰
+- 导出前补透明 padding
+
+相关文件：
+
+- [segment_flatlay_mask.py](/C:/Users/DELL/Desktop/outfit-cropper/segment_flatlay_mask.py)
 - [pipeline/flatlay_segmenter.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/flatlay_segmenter.py)
 - [pipeline/flatlay_mask_extractor.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/flatlay_mask_extractor.py)
+
+### 3. 分类阶段
+
+分类阶段分三层：
+
+1. `OpenCLIP ViT-B-32`
+   - 全量单品初判
+   - 负责 8 类快速分类
+
+2. `SigLIP base`
+   - 只处理服装类疑难样本
+   - 重点收敛 `Bottom / One_piece / Top / Outerwear`
+
+3. topology 规则裁决
+   - 基于单品 mask 的轮廓特征
+   - 重点解决“仅下半身被误判成 One_piece 或 Top”
+   - 同时保护明显连衣裙和明显外套/上衣
+
+相关文件：
+
+- [pipeline/item_classifier.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/item_classifier.py)
 - [segment_flatlay_mask.py](/C:/Users/DELL/Desktop/outfit-cropper/segment_flatlay_mask.py)
 
-## Full Pipeline
+## 全链路说明
 
-### Stage 1. Sample Selection
+### 1. 样本选择
 
-脚本：[pipeline/sample_selector.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/sample_selector.py)
+脚本：
 
-逻辑：
+- [pipeline/sample_selector.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/sample_selector.py)
 
-1. 从 `normal_1068807_1070000` 读取原图
-2. 如果已有 manifest，则直接复用
-3. 否则按 seed 随机抽样并写入 manifest
+流程：
 
-### Stage 2. Prompt Loading
+1. 读取原图目录中的图片列表
+2. 根据 manifest 或随机种子确定处理样本
 
-脚本：[pipeline/prompt_loader.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/prompt_loader.py)
+### 2. Prompt 加载
 
-逻辑：
+脚本：
 
-1. 根据 `--prompt-version` 解析 prompt 文件名
-2. 当前默认走 `flatlay_v9.txt`
+- [pipeline/prompt_loader.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/prompt_loader.py)
 
-### Stage 3. Flatlay Generation
+流程：
 
-脚本：[api_pilot.py](/C:/Users/DELL/Desktop/outfit-cropper/api_pilot.py)
+1. 根据 `prompt-version` 定位 prompt 文件
+2. 读取 prompt 内容
+3. 交给生图阶段调用
 
-内部调用：
+### 3. Flatlay 生图
 
-- [pipeline/nano_banana_client.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/nano_banana_client.py)
-- [utils/retry.py](/C:/Users/DELL/Desktop/outfit-cropper/utils/retry.py)
+脚本：
 
-逻辑：
+- [api_pilot.py](/C:/Users/DELL/Desktop/outfit-cropper/api_pilot.py)
 
-1. 读取原图
+流程：
+
+1. 读取原始人物图
 2. 加载 `flatlay_v9` prompt
-3. 调 Gemini API
-4. 保存 `flatlay.png`
-5. 在 debug 模式下保存 `prompt.txt / request.json / response.json / review.json`
+3. 调用 Gemini API 生成 `flatlay.png`
 
-当前默认输入：
+### 4. Flatlay 切图
 
-- 原图目录：`normal_1068807_1070000`
+脚本：
 
-当前常用输出：
+- [pipeline/flatlay_segmenter.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/flatlay_segmenter.py)
 
-- `pilot_output/round_100_v9_debug`
+流程：
 
-### Stage 4. Flatlay Segmentation
+1. 估计背景颜色
+2. 构建前景 mask
+3. 提取候选区域
+4. 对候选区域做局部 GrabCut 精修
+5. 导出单品透明 PNG
 
-底层脚本：[pipeline/flatlay_segmenter.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/flatlay_segmenter.py)
+这里的 `bbox` 用于：
 
-逻辑：
+- 候选区域定位
+- 排序
+- 元数据记录
 
-1. 估计背景色
-2. 在 LAB 空间做前景差分
-3. 生成 `loose_mask` 和 `strong_mask`
-4. 基于连通域提取候选区域
-5. 对每个候选区域运行局部 GrabCut
-6. 生成局部精修 mask
-7. 用 mask 导出透明 PNG
+最终单品图仍然由 `mask` 决定。
 
-关键点：
+### 5. 后处理
 
-- 这里生成的 `bbox` 只用来定位候选区域和写元数据
-- 最终单品图是按 `mask` 抠出的透明 PNG，不是按矩形直接裁
+脚本：
 
-### Stage 5. Mask-First Post Processing
+- [pipeline/flatlay_mask_extractor.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/flatlay_mask_extractor.py)
 
-脚本：[pipeline/flatlay_mask_extractor.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/flatlay_mask_extractor.py)
+流程：
 
-逻辑：
-
-1. 丢弃极小噪点
-2. 合并一双鞋为一个商品
-3. 合并明显成对的小配饰
-4. 给每个单品图加透明 padding
+1. 去掉微小噪点
+2. 合并一双鞋
+3. 合并成对小配饰
+4. 给最终 PNG 加透明 padding
 5. 重新编号
-6. 生成 review 用的 `relayout.png`
 
-当前默认 padding：
+### 6. 单品分类
 
-- `pad_ratio=0.08`
-- `min_pad_px=24`
+脚本：
 
-### Stage 6. Export
+- [pipeline/item_classifier.py](/C:/Users/DELL/Desktop/outfit-cropper/pipeline/item_classifier.py)
 
-脚本：[segment_flatlay_mask.py](/C:/Users/DELL/Desktop/outfit-cropper/segment_flatlay_mask.py)
+流程：
 
-每个样本输出：
+1. 对每个单品图做第一轮 OpenCLIP 分类
+2. 对服装类疑难样本补做 SigLIP 二判
+3. 用 topology 特征修正 `Bottom / One_piece / Top`
+4. 输出 `class_name`、`class_confidence`、`classification_stage`
+5. 额外记录：
+   - `stage2_triggered`
+   - `topology_reranked`
+   - `decision_reason`
+
+### 7. 结果导出
+
+脚本：
+
+- [segment_flatlay_mask.py](/C:/Users/DELL/Desktop/outfit-cropper/segment_flatlay_mask.py)
+
+当前保留的最新结果目录：
+
+- `pilot_output/round_100_v9_debug_extract_mask_classified_siglip`
+
+目录内容：
 
 - `source.jpg`
 - `flatlay.png`
 - `meta.json`
-- `items/item_0.png`
-- `items/item_1.png`
-- ...
+- `items/item_*.png`
+- `review.html`
 
-debug 模式下额外输出：
+## Review 页面
 
-- `items/item_*_white.jpg`
-- `items/item_*_mask.png`
-- `relayout.png`
+脚本：
 
-### Stage 7. Review
+- [build_debug_review_page.py](/C:/Users/DELL/Desktop/outfit-cropper/build_debug_review_page.py)
 
-脚本：[build_debug_review_page.py](/C:/Users/DELL/Desktop/outfit-cropper/build_debug_review_page.py)
+支持两种输出：
 
-页面结构：
+1. 相对路径版 `review.html`
+   - 适合同目录查看
 
-1. 第一行左边原图，右边 flatlay
-2. 第二行开始展示所有切好的单品 PNG
-3. 单品过多时自动换行
-4. 透明区域用棋盘底显示
+2. 单文件内联版
+   - 使用 `--inline-assets`
+   - 适合单独发送到其他设备
+   - 会把图片全部嵌进 HTML，文件会明显变大
 
-当前常用 review 页面：
+## 常用命令
 
-- [pilot_output/round_100_v9_debug_extract_mask_padded/review.html](/C:/Users/DELL/Desktop/outfit-cropper/pilot_output/round_100_v9_debug_extract_mask_padded/review.html)
-
-## Current Commands
-
-### Generation
+### 切图并分类
 
 ```bash
-python api_pilot.py --input-dir normal_1068807_1070000 --output-dir pilot_output --sample-size 100 --round-id round_100_v9_debug --prompt-version v9
+py -3.12 segment_flatlay_mask.py --round-dir pilot_output/round_100_v9_debug --output-dir pilot_output/round_100_v9_debug_extract_mask_classified_siglip --minimal-output
 ```
 
-### Extraction
+### 生成相对路径版 review
 
 ```bash
-python segment_flatlay_mask.py --round-dir pilot_output/round_100_v9_debug --output-dir pilot_output/round_100_v9_debug_extract_mask_padded
+py -3.12 build_debug_review_page.py --round-dir pilot_output/round_100_v9_debug_extract_mask_classified_siglip --title "round_100_v9_debug_extract_mask_classified_siglip"
 ```
 
-### Review
+### 生成单文件内联版 review
 
 ```bash
-python build_debug_review_page.py --round-dir pilot_output/round_100_v9_debug_extract_mask_padded --title "round_100_v9 mask-first padded review"
+py -3.12 build_debug_review_page.py --round-dir pilot_output/round_100_v9_debug_extract_mask_classified_siglip --title "round_100_v9_debug_extract_mask_classified_siglip" --inline-assets
 ```
-
-## Current Output Directories
-
-- 原图目录：
-  - [normal_1068807_1070000](/C:/Users/DELL/Desktop/outfit-cropper/normal_1068807_1070000)
-- 最新生图结果：
-  - [pilot_output/round_100_v9_debug](/C:/Users/DELL/Desktop/outfit-cropper/pilot_output/round_100_v9_debug)
-- 最新切图结果：
-  - [pilot_output/round_100_v9_debug_extract_mask_padded](/C:/Users/DELL/Desktop/outfit-cropper/pilot_output/round_100_v9_debug_extract_mask_padded)
-
-## What Is Production Truth
-
-生产真值只有两种：
-
-- `flatlay.png`
-- `items/*.png`
-
-说明：
-
-- `items/*.png` 是最终单品图
-- `meta.json` 只做索引和调试
-- `bbox_xyxy` 只做调试，不用于最终切图

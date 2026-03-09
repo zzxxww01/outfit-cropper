@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import json
 from pathlib import Path
@@ -8,12 +9,11 @@ from typing import Any, Dict, List
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Build a debug-first HTML review page for one round."
-    )
+    parser = argparse.ArgumentParser(description="Build a debug-first HTML review page for one round.")
     parser.add_argument("--round-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--title", type=str, default="Debug Review")
+    parser.add_argument("--inline-assets", action="store_true", help="Embed images into the HTML so the file can be viewed standalone.")
     return parser.parse_args()
 
 
@@ -25,6 +25,26 @@ def read_json_if_exists(path: Path) -> Dict[str, Any]:
 
 def rel_path(path: Path, base: Path) -> str:
     return path.relative_to(base).as_posix()
+
+
+def file_to_data_uri(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        mime = "image/jpeg"
+    elif suffix == ".png":
+        mime = "image/png"
+    elif suffix == ".webp":
+        mime = "image/webp"
+    else:
+        raise ValueError(f"Unsupported inline asset type: {path}")
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def asset_src(path: Path, *, round_dir: Path, inline_assets: bool) -> str:
+    if inline_assets:
+        return file_to_data_uri(path)
+    return rel_path(path, round_dir)
 
 
 def render_usage(usage_metadata: Dict[str, Any]) -> str:
@@ -40,16 +60,11 @@ def render_usage(usage_metadata: Dict[str, Any]) -> str:
     )
 
 
-def render_links(round_dir: Path, outfit_dir: Path) -> str:
+def render_links(round_dir: Path, outfit_dir: Path, *, inline_assets: bool) -> str:
+    if inline_assets:
+        return '<span class="links-note">standalone html: local file links omitted</span>'
     links: List[str] = []
-    for name in [
-        "prompt.txt",
-        "request.json",
-        "response.json",
-        "review.json",
-        "meta.json",
-        "relayout.png",
-    ]:
+    for name in ["prompt.txt", "request.json", "response.json", "review.json", "meta.json", "relayout.png"]:
         path = outfit_dir / name
         if path.exists():
             links.append(
@@ -59,7 +74,7 @@ def render_links(round_dir: Path, outfit_dir: Path) -> str:
     return "".join(links)
 
 
-def render_top_row(round_dir: Path, outfit_dir: Path) -> str:
+def render_top_row(round_dir: Path, outfit_dir: Path, *, inline_assets: bool) -> str:
     figures: List[str] = []
     for label, filename in [("source", "source.jpg"), ("flatlay", "flatlay.png")]:
         path = outfit_dir / filename
@@ -68,7 +83,7 @@ def render_top_row(round_dir: Path, outfit_dir: Path) -> str:
                 f"""
                 <figure class="hero-figure">
                   <figcaption>{label}</figcaption>
-                  <img src="{html.escape(rel_path(path, round_dir))}" alt="{html.escape(outfit_dir.name)} {label}">
+                  <img src="{html.escape(asset_src(path, round_dir=round_dir, inline_assets=inline_assets))}" alt="{html.escape(outfit_dir.name)} {label}">
                 </figure>
                 """
             )
@@ -77,7 +92,7 @@ def render_top_row(round_dir: Path, outfit_dir: Path) -> str:
     return "".join(figures[:2])
 
 
-def render_items_grid(round_dir: Path, outfit_dir: Path, meta: Dict[str, Any]) -> str:
+def render_items_grid(round_dir: Path, outfit_dir: Path, meta: Dict[str, Any], *, inline_assets: bool) -> str:
     items = meta.get("items", [])
     if not items:
         return '<div class="items-grid empty-grid"><div class="empty">no extracted items</div></div>'
@@ -88,39 +103,45 @@ def render_items_grid(round_dir: Path, outfit_dir: Path, meta: Dict[str, Any]) -
         if not image_path.exists():
             continue
         source_method = item.get("source_method", "")
-        is_fallback = source_method.startswith("fallback")
-        if source_method == "yolo_seg_flatlay":
-            method_label = "yolo"
-        elif source_method == "mask_seg_flatlay":
-            method_label = "mask"
-        elif is_fallback:
-            method_label = "fallback"
-        else:
-            method_label = source_method or "item"
-        tile_class = "item-tile fallback-item" if method_label == "fallback" else "item-tile"
+        method_label = "mask" if source_method == "mask_seg_flatlay" else (source_method or "item")
         info_parts = [item.get("item_id", "item")]
         if item.get("class_name"):
             info_parts.append(item["class_name"])
-        elif item.get("group_type"):
-            info_parts.append(item["group_type"])
+        class_confidence = item.get("class_confidence")
+        if class_confidence is not None:
+            info_parts.append(f"conf {float(class_confidence):.2f}")
+        if item.get("classification_stage"):
+            info_parts.append(item["classification_stage"])
+        if item.get("stage2_triggered"):
+            info_parts.append("stage2")
+        if item.get("topology_reranked"):
+            info_parts.append("topology")
         area_ratio = item.get("area_ratio")
         if area_ratio is not None:
             info_parts.append(f"area {float(area_ratio):.4f}")
+
+        secondary_meta: List[str] = []
+        if item.get("decision_reason"):
+            secondary_meta.append(str(item["decision_reason"]))
+        if item.get("group_type") and item.get("group_type") != "single":
+            secondary_meta.append(str(item["group_type"]))
+
         tiles.append(
             f"""
-            <div class="{tile_class}">
-              <img src="{html.escape(rel_path(image_path, round_dir))}" alt="{html.escape(item.get('item_id', 'item'))}">
+            <div class="item-tile">
+              <img src="{html.escape(asset_src(image_path, round_dir=round_dir, inline_assets=inline_assets))}" alt="{html.escape(item.get('item_id', 'item'))}">
               <div class="item-meta">
                 <span>{html.escape(" | ".join(info_parts))}</span>
                 <span class="method method-{method_label}">{method_label}</span>
               </div>
+              {f'<div class="item-submeta">{html.escape(" | ".join(secondary_meta))}</div>' if secondary_meta else ''}
             </div>
             """
         )
     return f'<div class="items-grid">{"".join(tiles)}</div>'
 
 
-def build_entry(round_dir: Path, outfit_dir: Path) -> str:
+def build_entry(round_dir: Path, outfit_dir: Path, *, inline_assets: bool) -> str:
     request = read_json_if_exists(outfit_dir / "request.json")
     response = read_json_if_exists(outfit_dir / "response.json")
     review = read_json_if_exists(outfit_dir / "review.json")
@@ -130,13 +151,15 @@ def build_entry(round_dir: Path, outfit_dir: Path) -> str:
     prompt_version = request.get("prompt_version") or review.get("prompt_version") or "n/a"
     temperature = request.get("temperature", "n/a")
     review_status = review.get("status", "pending_review")
-    yolo_used = meta.get("yolo_used")
     pipeline = meta.get("pipeline", "")
+    classification_model = meta.get("classification_model", "")
+    classification_device = meta.get("classification_device", "")
+    classification_stage2_model = meta.get("classification_stage2_model", "")
+    classification_stage2_enabled = meta.get("classification_stage2_enabled")
     item_count = meta.get("item_count", 0)
     warnings = meta.get("warnings", [])
-    fallback_items = [
-        item for item in meta.get("items", []) if item.get("source_method", "").startswith("fallback")
-    ]
+    stage2_count = sum(1 for item in meta.get("items", []) if item.get("stage2_triggered"))
+    topology_count = sum(1 for item in meta.get("items", []) if item.get("topology_reranked"))
 
     badges: List[str] = [
         f"<span>prompt: {html.escape(str(prompt_version))}</span>",
@@ -145,22 +168,22 @@ def build_entry(round_dir: Path, outfit_dir: Path) -> str:
     ]
     if pipeline:
         badges.append(f"<span>pipeline: {html.escape(str(pipeline))}</span>")
-    if yolo_used is not None:
-        badges.append(f"<span>yolo_used: {html.escape(str(yolo_used))}</span>")
+    if classification_model:
+        badges.append(f"<span>classifier: {html.escape(str(classification_model))}</span>")
+    if classification_device:
+        badges.append(f"<span>device: {html.escape(str(classification_device))}</span>")
+    if classification_stage2_enabled:
+        badges.append(f"<span>stage2: {html.escape(str(classification_stage2_model))}</span>")
     if item_count:
         badges.append(f"<span>items: {html.escape(str(item_count))}</span>")
-    if fallback_items:
-        badges.append(
-            f'<span class="badge-fallback">fallback {len(fallback_items)}/{item_count}</span>'
-        )
-    elif item_count and yolo_used is True:
-        badges.append('<span class="badge-yolo">YOLO only</span>')
+    if stage2_count:
+        badges.append(f'<span class="badge-stage2">stage2 {stage2_count}/{item_count}</span>')
+    if topology_count:
+        badges.append(f'<span class="badge-topology">topology {topology_count}/{item_count}</span>')
 
     warnings_html = ""
     if warnings:
-        warnings_html = (
-            '<div class="warnings">' + " | ".join(html.escape(str(w)) for w in warnings) + "</div>"
-        )
+        warnings_html = '<div class="warnings">' + " | ".join(html.escape(str(w)) for w in warnings) + "</div>"
 
     return f"""
     <section class="card">
@@ -177,17 +200,17 @@ def build_entry(round_dir: Path, outfit_dir: Path) -> str:
       </div>
       {warnings_html}
       <div class="top-row">
-        {render_top_row(round_dir, outfit_dir)}
+        {render_top_row(round_dir, outfit_dir, inline_assets=inline_assets)}
       </div>
-      {render_items_grid(round_dir, outfit_dir, meta)}
+      {render_items_grid(round_dir, outfit_dir, meta, inline_assets=inline_assets)}
       <div class="links">
-        {render_links(round_dir, outfit_dir)}
+        {render_links(round_dir, outfit_dir, inline_assets=inline_assets)}
       </div>
     </section>
     """
 
 
-def build_html(round_dir: Path, title: str) -> str:
+def build_html(round_dir: Path, title: str, *, inline_assets: bool) -> str:
     batch_report = read_json_if_exists(round_dir / "batch_report.json")
     outfit_dirs = sorted(
         [
@@ -197,7 +220,7 @@ def build_html(round_dir: Path, title: str) -> str:
         ],
         key=lambda path: path.name,
     )
-    entries = "\n".join(build_entry(round_dir, outfit_dir) for outfit_dir in outfit_dirs)
+    entries = "\n".join(build_entry(round_dir, outfit_dir, inline_assets=inline_assets) for outfit_dir in outfit_dirs)
 
     summary_bits = [
         f"processed={batch_report.get('processed', 'n/a')}",
@@ -206,10 +229,16 @@ def build_html(round_dir: Path, title: str) -> str:
     ]
     if "pipeline" in batch_report:
         summary_bits.append(f"pipeline={batch_report.get('pipeline')}")
-    if "prompt_version" in batch_report:
-        summary_bits.append(f"prompt={batch_report.get('prompt_version')}")
-    if "temperature" in batch_report:
-        summary_bits.append(f"temperature={batch_report.get('temperature')}")
+    if "classification_model" in batch_report:
+        summary_bits.append(f"classifier={batch_report.get('classification_model')}")
+    if batch_report.get("classification_stage2_model"):
+        summary_bits.append(f"stage2={batch_report.get('classification_stage2_model')}")
+    if "stage2_triggered_items" in batch_report:
+        summary_bits.append(f"stage2_items={batch_report.get('stage2_triggered_items')}")
+    if "topology_reranked_items" in batch_report:
+        summary_bits.append(f"topology_items={batch_report.get('topology_reranked_items')}")
+
+    standalone_note = "当前文件为单文件内联版本，可单独发送到其他设备查看。" if inline_assets else "当前文件使用相对路径引用图片，需与结果目录一起查看。"
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -225,9 +254,9 @@ def build_html(round_dir: Path, title: str) -> str:
       --text: #1f1a14;
       --muted: #6a6258;
       --accent: #1d6c5f;
-      --warn: #a6422b;
-      --warn-bg: #fbe8e2;
       --ok-bg: #e7f4ef;
+      --cool-bg: #eef2ff;
+      --cool-text: #3047a5;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -270,7 +299,7 @@ def build_html(round_dir: Path, title: str) -> str:
       gap: 8px;
       flex-wrap: wrap;
     }}
-    .badges span, .usage span, .links a {{
+    .badges span, .usage span, .links a, .links-note {{
       display: inline-flex;
       align-items: center;
       min-height: 32px;
@@ -282,19 +311,19 @@ def build_html(round_dir: Path, title: str) -> str:
       text-decoration: none;
       font-size: 12px;
     }}
-    .badge-fallback {{
-      background: var(--warn-bg) !important;
-      color: var(--warn) !important;
-      border-color: #e2b7aa !important;
-    }}
-    .badge-yolo {{
+    .badge-stage2 {{
       background: var(--ok-bg) !important;
       color: var(--accent) !important;
       border-color: #b9d7cb !important;
     }}
+    .badge-topology {{
+      background: var(--cool-bg) !important;
+      color: var(--cool-text) !important;
+      border-color: #c7d1ff !important;
+    }}
     .warnings {{
       margin-bottom: 12px;
-      color: var(--warn);
+      color: #a6422b;
       font-size: 12px;
     }}
     .top-row {{
@@ -362,29 +391,20 @@ def build_html(round_dir: Path, title: str) -> str:
       font-size: 12px;
       flex-wrap: wrap;
     }}
-    .fallback-item {{
-      border-color: #d58f78;
-      box-shadow: inset 0 0 0 1px rgba(166,66,43,0.08);
+    .item-submeta {{
+      padding: 0 10px 10px;
+      color: var(--muted);
+      font-size: 11px;
     }}
     .method {{
       border-radius: 999px;
       padding: 2px 8px;
       border: 1px solid transparent;
     }}
-    .method-yolo {{
-      background: var(--ok-bg);
-      color: var(--accent);
-      border-color: #b9d7cb;
-    }}
     .method-mask {{
-      background: #eef2ff;
-      color: #3047a5;
+      background: var(--cool-bg);
+      color: var(--cool-text);
       border-color: #c7d1ff;
-    }}
-    .method-fallback {{
-      background: var(--warn-bg);
-      color: var(--warn);
-      border-color: #e2b7aa;
     }}
     @media (max-width: 900px) {{
       .page {{ width: calc(100vw - 16px); margin: 8px auto 32px; }}
@@ -400,7 +420,8 @@ def build_html(round_dir: Path, title: str) -> str:
     <section class="hero">
       <h1>{html.escape(title)}</h1>
       <p>{html.escape(" | ".join(summary_bits))}</p>
-      <p>第一行左边原图，右边 flatlay。下面展示所有切好的透明单品 PNG，透明区域会显示为棋盘底。</p>
+      <p>{html.escape(standalone_note)}</p>
+      <p>第一行左侧为原图，右侧为 flatlay。下方展示所有切好的透明单品 PNG，并标注最终类别、置信度，以及是否触发 stage2 二判或 topology 重排。</p>
     </section>
     <section class="cards">
       {entries}
@@ -415,8 +436,12 @@ def main() -> int:
     args = parse_args()
     if not args.round_dir.exists():
         raise FileNotFoundError(f"Round directory does not exist: {args.round_dir}")
-    output_path = args.output or (args.round_dir / "review.html")
-    output_path.write_text(build_html(args.round_dir, args.title), encoding="utf-8")
+    default_name = "review_inline.html" if args.inline_assets else "review.html"
+    output_path = args.output or (args.round_dir / default_name)
+    output_path.write_text(
+        build_html(args.round_dir, args.title, inline_assets=args.inline_assets),
+        encoding="utf-8",
+    )
     return 0
 
 

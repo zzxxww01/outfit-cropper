@@ -1,57 +1,72 @@
 # outfit-cropper
 
-当前仓库只保留一条主链路：
+当前项目主链路：
 
-1. 用 Gemini API 基于原图生成一张 flatlay 图
-2. 对 flatlay 图做纯 `mask-first` 单品切图
-3. 生成 `review.html` 做人工检查
+`原始人物图 -> Gemini flatlay 生图 -> mask-first 切图 -> OpenCLIP 初判 + SigLIP 二判 + topology 重排 -> review.html`
 
-完整链路文档见：
+完整说明见 [docs/full-chain.md](/C:/Users/DELL/Desktop/outfit-cropper/docs/full-chain.md)。
 
-- [docs/full-chain.md](/C:/Users/DELL/Desktop/outfit-cropper/docs/full-chain.md)
-
-## Current Models
+## 当前模型与方法
 
 - 生图模型：`gemini-3.1-flash-image-preview`
 - 当前 prompt：`prompts/flatlay_v9.txt`
-- 切图阶段：不使用 YOLO，不使用其他检测模型，使用 `OpenCV + GrabCut` 的 `mask-first` 方案
+- 切图：`OpenCV + GrabCut` 的 `mask-first` 管线
+- 分类：
+  - 第一阶段：本地 `OpenCLIP ViT-B-32`
+  - 第二阶段：本地 `SigLIP base`
+  - 最终裁决：基于单品 mask 的 topology 规则
 
-## Main Entrypoints
+## 8 类分类
 
-生成 flatlay：
+- `Outerwear`
+- `Top`
+- `Bottom`
+- `One_piece`
+- `Shoes`
+- `Bag`
+- `Accessories`
+- `Unknown`
+
+## 当前保留结果
+
+当前只保留最新一版结果目录：
+
+- `pilot_output/round_100_v9_debug_extract_mask_classified_siglip`
+
+该目录包含：
+
+- `source.jpg`
+- `flatlay.png`
+- `meta.json`
+- `items/item_*.png`
+- `review.html`
+
+## 常用命令
+
+切图并分类：
 
 ```bash
-python api_pilot.py --input-dir normal_1068807_1070000 --output-dir pilot_output --sample-size 100 --round-id round_100_v9_debug --prompt-version v9
+py -3.12 segment_flatlay_mask.py --round-dir pilot_output/round_100_v9_debug --output-dir pilot_output/round_100_v9_debug_extract_mask_classified_siglip --minimal-output
 ```
 
-切 flatlay 单品：
+生成相对路径版 review：
 
 ```bash
-python segment_flatlay_mask.py --round-dir pilot_output/round_100_v9_debug --output-dir pilot_output/round_100_v9_debug_extract_mask_padded
+py -3.12 build_debug_review_page.py --round-dir pilot_output/round_100_v9_debug_extract_mask_classified_siglip --title "round_100_v9_debug_extract_mask_classified_siglip"
 ```
 
-生成 review 页面：
+如需单文件内联版 review：
 
 ```bash
-python build_debug_review_page.py --round-dir pilot_output/round_100_v9_debug_extract_mask_padded --title "round_100_v9 mask-first padded review"
+py -3.12 build_debug_review_page.py --round-dir pilot_output/round_100_v9_debug_extract_mask_classified_siglip --title "round_100_v9_debug_extract_mask_classified_siglip" --inline-assets
 ```
 
-## Main Files
+## 主要文件
 
 - `api_pilot.py`
 - `segment_flatlay_mask.py`
 - `build_debug_review_page.py`
-- `pipeline/nano_banana_client.py`
-- `pipeline/prompt_loader.py`
-- `pipeline/sample_selector.py`
 - `pipeline/flatlay_segmenter.py`
 - `pipeline/flatlay_mask_extractor.py`
+- `pipeline/item_classifier.py`
 - `prompts/flatlay_v9.txt`
-
-## Notes
-
-- 生产切图依据是 `mask`，不是 `bbox`
-- `meta.json` 中的 `bbox_xyxy` 只用于调试和排序
-- 当前默认导出会给透明 PNG 加 padding：
-  - `pad_ratio=0.08`
-  - `min_pad_px=24`

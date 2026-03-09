@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 from PIL import Image
 
+from pipeline.item_classifier import FlatlayItemClassifier
 from pipeline.flatlay_mask_extractor import FlatlayMaskExtractor
 from utils.io_utils import ensure_dir, read_image, write_json
 from utils.logging_utils import setup_logger
@@ -22,6 +23,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-items", type=int, default=10)
     parser.add_argument("--pad-ratio", type=float, default=0.08)
     parser.add_argument("--min-pad-px", type=int, default=24)
+    parser.add_argument("--skip-classification", action="store_true")
+    parser.add_argument("--classification-device", type=str, default="auto")
+    parser.add_argument("--classification-batch-size", type=int, default=8)
+    parser.add_argument("--clip-model", type=str, default="ViT-B-32")
+    parser.add_argument("--clip-pretrained", type=str, default="openai")
+    parser.add_argument("--disable-stage2-rerank", action="store_true")
+    parser.add_argument("--stage2-model", type=str, default="google/siglip-base-patch16-224")
+    parser.add_argument("--stage2-device", type=str, default="auto")
+    parser.add_argument("--stage2-batch-size", type=int, default=4)
     parser.add_argument("--log-level", type=str, default="INFO")
     parser.add_argument("--minimal-output", action="store_true")
     return parser.parse_args()
@@ -50,6 +60,19 @@ def main() -> int:
         output_pad_ratio=args.pad_ratio,
         min_output_pad_px=args.min_pad_px,
     )
+    classifier = None
+    if not args.skip_classification:
+        classifier = FlatlayItemClassifier(
+            model_name=args.clip_model,
+            pretrained=args.clip_pretrained,
+            batch_size=args.classification_batch_size,
+            logger=logger,
+            device=args.classification_device,
+            stage2_enabled=not args.disable_stage2_rerank,
+            stage2_model_name=args.stage2_model,
+            stage2_device=args.stage2_device,
+            stage2_batch_size=args.stage2_batch_size,
+        )
 
     outfit_dirs = sorted(
         [path for path in round_dir.iterdir() if path.is_dir() and (path / "flatlay.png").exists()],
@@ -67,8 +90,27 @@ def main() -> int:
         "pipeline": "mask_seg_flatlay",
         "pad_ratio": args.pad_ratio,
         "min_pad_px": args.min_pad_px,
+        "classification_enabled": not args.skip_classification,
+        "classification_model": args.clip_model if not args.skip_classification else "",
+        "classification_pretrained": args.clip_pretrained if not args.skip_classification else "",
+        "classification_device": classifier.device if classifier is not None else "",
+        "classification_stage2_enabled": bool(classifier is not None and classifier.stage2_reranker is not None),
+        "classification_stage2_model": args.stage2_model if classifier is not None and classifier.stage2_reranker is not None else "",
         "items_per_outfit": {},
         "pair_group_counts": {"shoe_pair": 0, "accessory_pair": 0},
+        "stage2_triggered_items": 0,
+        "topology_reranked_items": 0,
+        "decision_reason_counts": {},
+        "class_counts": {
+            "Outerwear": 0,
+            "Top": 0,
+            "Bottom": 0,
+            "One_piece": 0,
+            "Shoes": 0,
+            "Bag": 0,
+            "Accessories": 0,
+            "Unknown": 0,
+        },
         "errors": [],
     }
 
@@ -83,6 +125,17 @@ def main() -> int:
             flatlay_path = outfit_dir / "flatlay.png"
             image = read_image(flatlay_path)
             result = extractor.extract_items(image)
+            if classifier is not None and result.items:
+                classifications = classifier.classify_items(items=result.items, flatlay_image=image)
+                for item, classification in zip(result.items, classifications):
+                    item.class_name = classification.class_name
+                    item.class_confidence = classification.class_confidence
+                    item.classification_stage = classification.classification_stage
+                    item.top_scores = classification.top_scores
+                    item.stage2_triggered = classification.stage2_triggered
+                    item.topology_reranked = classification.topology_reranked
+                    item.decision_reason = classification.decision_reason
+                    item.shape_features = classification.shape_features
             save_debug_artifacts = not args.minimal_output
 
             shutil.copy2(flatlay_path, destination_dir / "flatlay.png")
@@ -95,6 +148,15 @@ def main() -> int:
                 item.rgba_crop.save(item_png_path)
                 if item.group_type in report["pair_group_counts"]:
                     report["pair_group_counts"][item.group_type] += 1
+                report["class_counts"][item.class_name] += 1
+                if item.stage2_triggered:
+                    report["stage2_triggered_items"] += 1
+                if item.topology_reranked:
+                    report["topology_reranked_items"] += 1
+                if item.decision_reason:
+                    report["decision_reason_counts"][item.decision_reason] = (
+                        report["decision_reason_counts"].get(item.decision_reason, 0) + 1
+                    )
                 if save_debug_artifacts:
                     item_white_path = items_dir / f"{item.item_id}_white.jpg"
                     item_mask_path = items_dir / f"{item.item_id}_mask.png"
@@ -108,6 +170,11 @@ def main() -> int:
                 "source_image": "source.jpg" if source_path.exists() else "",
                 "flatlay_image": "flatlay.png",
                 "status": "ok",
+                "classification_model": args.clip_model if classifier is not None else "",
+                "classification_pretrained": args.clip_pretrained if classifier is not None else "",
+                "classification_device": classifier.device if classifier is not None else "",
+                "classification_stage2_enabled": bool(classifier is not None and classifier.stage2_reranker is not None),
+                "classification_stage2_model": args.stage2_model if classifier is not None and classifier.stage2_reranker is not None else "",
                 **result.to_dict(),
             }
             for item in meta["items"]:
