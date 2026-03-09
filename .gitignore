@@ -13,6 +13,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.so
+.cache/
 build/
 dist/
 .pytest_cache/
