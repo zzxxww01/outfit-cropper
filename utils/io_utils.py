@@ -35,7 +35,7 @@ def write_json(path: Path, data: Any) -> None:
 
 
 def read_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8-sig") as f:
         return json.load(f)
 
 
@@ -45,4 +45,3 @@ def to_relative_posix(path: Path, base: Path) -> str:
 
 def safe_stem(path: Path) -> str:
     return path.stem.strip()
-

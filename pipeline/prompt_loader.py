@@ -3,13 +3,26 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def resolve_prompt_path(prompts_dir: Path, prompt_version: str) -> Path:
+ALLOWED_PROMPT_ALIASES = {
+    "v1": "flatlay_v1.txt",
+    "flatlay_v1": "flatlay_v1.txt",
+    "flatlay_v1.txt": "flatlay_v1.txt",
+}
+
+
+def normalize_prompt_version(prompt_version: str) -> str:
     normalized = prompt_version.strip()
-    if normalized.endswith(".txt"):
-        return prompts_dir / normalized
-    if not normalized.startswith("flatlay_"):
-        normalized = f"flatlay_{normalized}"
-    return prompts_dir / f"{normalized}.txt"
+    try:
+        return ALLOWED_PROMPT_ALIASES[normalized]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(ALLOWED_PROMPT_ALIASES))
+        raise ValueError(
+            f"Unsupported prompt version: {prompt_version!r}. Only prompt v1 is retained. Allowed values: {allowed}"
+        ) from exc
+
+
+def resolve_prompt_path(prompts_dir: Path, prompt_version: str) -> Path:
+    return prompts_dir / normalize_prompt_version(prompt_version)
 
 
 def load_prompt(prompts_dir: Path, prompt_version: str) -> str:

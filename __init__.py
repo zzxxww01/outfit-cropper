@@ -1,2 +1,0 @@
-"""outfit-cropper package."""
-

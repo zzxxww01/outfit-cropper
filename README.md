@@ -1,72 +1,48 @@
 # outfit-cropper
 
-当前项目主链路：
+当前项目只保留一条可运行主链路：
 
 `原始人物图 -> Gemini flatlay 生图 -> mask-first 切图 -> OpenCLIP 初判 + SigLIP 二判 + topology 重排 -> review.html`
 
-完整说明见 [docs/full-chain.md](/C:/Users/DELL/Desktop/outfit-cropper/docs/full-chain.md)。
+## 保留内容
 
-## 当前模型与方法
+- 生图入口：[api_pilot.py](/C:/Users/DELL/Desktop/outfit-cropper/api_pilot.py)
+- 切图与分类入口：[segment_flatlay_mask.py](/C:/Users/DELL/Desktop/outfit-cropper/segment_flatlay_mask.py)
+- review 生成入口：[build_debug_review_page.py](/C:/Users/DELL/Desktop/outfit-cropper/build_debug_review_page.py)
+- prompt 文件：[flatlay_v1.txt](/C:/Users/DELL/Desktop/outfit-cropper/prompts/flatlay_v1.txt)
+- 最后一轮结果目录：`pilot_output/final_round_v1`
 
-- 生图模型：`gemini-3.1-flash-image-preview`
-- 当前 prompt：`prompts/flatlay_v9.txt`
-- 切图：`OpenCV + GrabCut` 的 `mask-first` 管线
-- 分类：
-  - 第一阶段：本地 `OpenCLIP ViT-B-32`
-  - 第二阶段：本地 `SigLIP base`
-  - 最终裁决：基于单品 mask 的 topology 规则
+## 当前约定
 
-## 8 类分类
+- prompt 版本只支持 `v1`
+- 生图模型默认是 `gemini-3.1-flash-image-preview`
+- 切图主链路只保留 `mask-first`
+- 分类主链路是 `OpenCLIP ViT-B-32 + SigLIP + topology`
 
-- `Outerwear`
-- `Top`
-- `Bottom`
-- `One_piece`
-- `Shoes`
-- `Bag`
-- `Accessories`
-- `Unknown`
+## 主要目录
 
-## 当前保留结果
-
-当前只保留最新一版结果目录：
-
-- `pilot_output/round_100_v9_debug_extract_mask_classified_siglip`
-
-该目录包含：
-
-- `source.jpg`
-- `flatlay.png`
-- `meta.json`
-- `items/item_*.png`
-- `review.html`
+- `pipeline/`: 主链路依赖模块
+- `utils/`: 通用 IO、日志和重试工具
+- `prompts/`: 当前只保留 `flatlay_v1.txt`
+- `pilot_output/final_round_v1/`: 保留的最后一轮结果
+- `normal_1068807_1070000/`: 示例输入图目录
 
 ## 常用命令
+
+生成 flatlay：
+
+```bash
+py -3.12 api_pilot.py --prompt-version v1 --round-id round_001_v1
+```
 
 切图并分类：
 
 ```bash
-py -3.12 segment_flatlay_mask.py --round-dir pilot_output/round_100_v9_debug --output-dir pilot_output/round_100_v9_debug_extract_mask_classified_siglip --minimal-output
+py -3.12 segment_flatlay_mask.py --round-dir pilot_output/round_001_v1 --output-dir pilot_output/final_round_v1 --minimal-output
 ```
 
-生成相对路径版 review：
+生成 review：
 
 ```bash
-py -3.12 build_debug_review_page.py --round-dir pilot_output/round_100_v9_debug_extract_mask_classified_siglip --title "round_100_v9_debug_extract_mask_classified_siglip"
+py -3.12 build_debug_review_page.py --round-dir pilot_output/final_round_v1 --title "final_round_v1"
 ```
-
-如需单文件内联版 review：
-
-```bash
-py -3.12 build_debug_review_page.py --round-dir pilot_output/round_100_v9_debug_extract_mask_classified_siglip --title "round_100_v9_debug_extract_mask_classified_siglip" --inline-assets
-```
-
-## 主要文件
-
-- `api_pilot.py`
-- `segment_flatlay_mask.py`
-- `build_debug_review_page.py`
-- `pipeline/flatlay_segmenter.py`
-- `pipeline/flatlay_mask_extractor.py`
-- `pipeline/item_classifier.py`
-- `prompts/flatlay_v9.txt`

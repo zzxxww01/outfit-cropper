@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 from dotenv import load_dotenv
 
-from pipeline.nano_banana_client import GeminiApiError, GeminiImageClient
+from pipeline.gemini_image_client import GeminiApiError, GeminiImageClient
 from pipeline.prompt_loader import load_prompt
 from pipeline.sample_selector import load_or_create_manifest
 from utils.io_utils import ensure_dir, write_json
@@ -19,7 +19,7 @@ from utils.retry import run_with_retries
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a Nano Banana 2 prompt-iteration pilot on sampled outfit images."
+        description="Generate flatlay images from sampled outfit photos."
     )
     parser.add_argument("--input-dir", type=Path, default=Path("normal_1068807_1070000"))
     parser.add_argument("--output-dir", type=Path, default=Path("pilot_output"))
@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--round-id", type=str, default="round_001")
     parser.add_argument("--manifest-path", type=Path, default=None)
     parser.add_argument("--only-outfit-id", type=str, default="")
-    parser.add_argument("--prompt-version", type=str, default="v9")
+    parser.add_argument("--prompt-version", type=str, default="v1")
     parser.add_argument("--prompts-dir", type=Path, default=Path("prompts"))
     parser.add_argument("--model", type=str, default="gemini-3.1-flash-image-preview")
     parser.add_argument("--api-key-env", type=str, default="GEMINI_API_KEY")
@@ -186,7 +186,7 @@ def main() -> int:
                 temperature=args.temperature,
                 max_retries=args.max_retries,
                 logger=logger,
-                step_name=f"{outfit_id}:nano_banana_generate",
+                step_name=f"{outfit_id}:gemini_generate",
             )
             if save_debug_artifacts:
                 write_json(outfit_dir / "response.json", result.response_summary)

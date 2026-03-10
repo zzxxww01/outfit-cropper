@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
 def read_json_if_exists(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def rel_path(path: Path, base: Path) -> str:
